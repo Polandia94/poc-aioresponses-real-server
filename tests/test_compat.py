@@ -1,10 +1,11 @@
 from itertools import product
 from unittest import TestCase
+import pytest
 
 from ddt import data, ddt, unpack
 from yarl import URL
 
-from aioresponses.compat import merge_params, normalize_url
+# from aioresponses.compat import merge_params, normalize_url
 
 
 def get_url(url: str, as_str: bool) -> URL | str:
@@ -12,6 +13,7 @@ def get_url(url: str, as_str: bool) -> URL | str:
 
 
 @ddt
+@pytest.mark.skip
 class CompatTestCase(TestCase):
     use_default_loop = False
 

@@ -1,0 +1,24 @@
+[project]
+name = "aioresponse-server"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Pablo Estevez",email = "pablo22estevez@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yarl (>=1.23.0,<2.0.0)",
+    "aiohttp (>=3.13.3,<4.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+tests = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "ddt (>=1.7.2,<2.0.0)"
+]

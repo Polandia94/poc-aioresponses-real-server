@@ -6,6 +6,8 @@ from yarl import URL
 from unittest.mock import patch
 import aiohttp
 from multidict import MultiDict
+from functools import wraps
+import asyncio
 
 
 class FakeResolver(DefaultResolver):
@@ -50,10 +52,19 @@ def merge_params(url: URL | str, params: dict | None = None) -> URL:
     return url
 
 
-class aioresponses_2:
-    def __init__(self):
-        self.resolver = FakeResolver()
+class aioresponses:
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+        self.param = kwargs.pop('param', None)
+        self._resolver = None
         self.handlers = {}
+        self.requests = {}
+
+    @property
+    def resolver(self):
+        if self._resolver is None:
+            self._resolver = FakeResolver()
+        return self._resolver
 
     async def _dispatch(self, request):
         handler = self.handlers.get(request.path)
@@ -62,12 +73,12 @@ class aioresponses_2:
         return web.Response(status=404, text="Not Found")
 
     async def __aenter__(self, **kwargs):
-        self.requests = {}
+        config = {**self._kwargs, **kwargs}
         app = web.Application()
         # Add a catch-all route that can handle dynamic paths
         app.router.add_route("*", "/{tail:.*}", self._dispatch)
 
-        self.server = TestServer(app, **kwargs)
+        self.server = TestServer(app, **config)
         await self.server.start_server()
         self.app = app
 
@@ -88,6 +99,22 @@ class aioresponses_2:
         self._patcher.stop()
         await self.server.close()
 
+    def __call__(self, f):
+
+
+        @wraps(f)
+        async def wrapper(*args, **kwargs):
+            async with self as m:
+                if self.param:
+                    kwargs[self.param] = m
+                else:
+                    args = args + (m,)
+                if asyncio.iscoroutinefunction(f):
+                    return await f(*args, **kwargs)
+                else:
+                    return f(*args, **kwargs)
+        return wrapper
+
     def get(self, url: URL | str, status=200, body="OK"):
         async def handler(request):
             key = (request.method.upper(), request.url)
@@ -103,6 +130,7 @@ class aioresponses_2:
 
         # we add the handler to our dynamic map
         self.handlers[url.path] = handler
+
 
     def assert_called_with(
         self, url: URL | str, method: str = "GET", params: dict | None = None
