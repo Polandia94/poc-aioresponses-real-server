@@ -203,8 +203,16 @@ class aioresponses:
             original = self._originals[type(resolver_self)]
             return await original(resolver_self, host, port, family)
 
-        print(f"No mock registered for host {host!r}")
-        raise OSError(f"Connection refused: no mock registered for host {host!r}")
+        return [
+                {
+                    "hostname": host,
+                    "host": self.server.host,
+                    "port": self.server.port,
+                    "family": family,
+                    "proto": 0,
+                    "flags": 0,
+                }
+            ]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -229,12 +237,16 @@ class aioresponses:
     # ------------------------------------------------------------------
 
     async def _dispatch(self, request: web.Request) -> web.Response:
+        key = (request.method.upper(), normalize_url(request.url))
+        self.requests.setdefault(key, [])
+        request.kwargs = {"headers": request.headers, "query": dict(request.query)}
+        self.requests[key].append(request)
         handler = self.handlers.get(request.path)
         if handler is None:
             # this should raise ClientConnectionError on the other side
             if request.transport:
                 request.transport.close()
-            return web.Response(status=404)
+            raise Exception(f"No handler for path {request.path!r}")
         return await handler(request)
 
     # ------------------------------------------------------------------
@@ -250,6 +262,7 @@ class aioresponses:
         payload: "dict | None" = None,
         headers: "dict | None" = None,
         repeat: "bool | int" = False,
+        content_type: "str | None" = None,
         **kwargs,
     ) -> None:
         if isinstance(url, str):
@@ -275,6 +288,8 @@ class aioresponses:
         resp_headers = dict(headers or {})
         if payload is not None and "Content-Type" not in resp_headers:
             resp_headers["Content-Type"] = "application/json"
+        if content_type is not None:
+            resp_headers["Content-Type"] = content_type
 
         _body = body
         _status = status
@@ -285,9 +300,6 @@ class aioresponses:
             # Only match on method
             if request.method.upper() != _method:
                 return web.Response(status=405, text="Method Not Allowed")
-            key = (request.method.upper(), normalize_url(request.url))
-            self.requests.setdefault(key, [])
-            self.requests[key].append(request)
             return web.Response(status=_status, body=_body, headers=_headers)
 
         path = url.path or "/"
