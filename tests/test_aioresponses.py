@@ -66,9 +66,9 @@ class AIOResponsesTestCase(AsyncTestCase):
             mocked.assert_called_once_with(self.url, method=http_method)
 
     @aioresponses()
-    def test_returned_instance(self, m):
+    async def test_returned_instance(self, m):
         m.get(self.url)
-        response = self.run_async(self.session.get(self.url))
+        response = await self.session.get(self.url)
         self.assertIsInstance(response, ClientResponse)
 
     @aioresponses()
