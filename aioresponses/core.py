@@ -1,7 +1,4 @@
-import re
 import socket
-import asyncio
-import warnings
 from functools import wraps
 from re import Pattern
 from unittest.mock import patch
@@ -14,11 +11,10 @@ from aiohttp import ClientResponse, web, hdrs
 from aiohttp.connector import TCPConnector
 from aiohttp.resolver import ThreadedResolver, AsyncResolver
 from aiohttp.test_utils import TestServer
-from aiohttp.client_exceptions import ClientConnectionError
 from aiohttp.web_request import Request
-from multidict import MultiDict
 from yarl import URL
-from typing import Callable, Dict, Optional, Type, Union
+from typing import Callable, Optional, Type, Union
+from .compat import merge_params, normalize_url
 
 
 # ---------------------------------------------------------------------------
@@ -44,22 +40,6 @@ class CallbackResult:
         self.headers = headers
         self.response_class = response_class
         self.reason = reason
-
-def normalize_url(url: "URL | str") -> URL:
-    """Normalize url to make comparisons."""
-    url = URL(url)
-    if url.fragment:
-        url = url.with_fragment(None)
-    return url.with_query(sorted(url.query.items()))
-
-
-def merge_params(url: "URL | str", params: "dict | None" = None) -> URL:
-    url = URL(url)
-    if params:
-        query_params = MultiDict(url.query)
-        query_params.extend(url.with_query(params).query)
-        return url.with_query(query_params)
-    return url
 
 
 # ---------------------------------------------------------------------------
