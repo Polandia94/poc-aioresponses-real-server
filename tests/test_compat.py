@@ -1,8 +1,7 @@
 from itertools import product
 from unittest import TestCase
-import pytest
 
-from ddt import data, ddt, unpack
+from ddt import data, ddt, unpack  # type: ignore[import-untyped]
 from yarl import URL
 
 from aioresponses.compat import merge_params, normalize_url
