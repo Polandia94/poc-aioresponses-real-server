@@ -1,9 +1,13 @@
 import socket
 from functools import wraps
 from re import Pattern
+import typing
 from unittest.mock import patch
-import json as _json
+import json
 import inspect
+import warnings
+import gc
+from urllib.parse import urlencode, parse_qs
 
 
 import aiohttp
@@ -14,26 +18,22 @@ from aiohttp.resolver import ThreadedResolver, AsyncResolver
 from aiohttp.test_utils import TestServer
 from aiohttp.web_request import Request
 from yarl import URL
-from typing import Any, Awaitable, Callable, Optional, Type, Union
+from typing import Any, Awaitable, Callable, Type
 from .compat import merge_params, normalize_url
 
 
-# ---------------------------------------------------------------------------
-# URL helpers
-# ---------------------------------------------------------------------------
-
-
 class CallbackResult:
+    """ Result object return by a callback """
     def __init__(
         self,
         method: str = hdrs.METH_GET,
         status: int = 200,
-        body: Union[str, bytes] = "",
+        body: str | bytes = "",
         content_type: str = "application/json",
         payload: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
-        response_class: Optional[Type[ClientResponse]] = None,
-        reason: Optional[str] = None,
+        response_class: Type[ClientResponse] | None = None,
+        reason: str | None = None,
     ):
         self.method = method
         self.status = status
@@ -44,31 +44,28 @@ class CallbackResult:
         self.response_class = response_class
         self.reason = reason
 
-
-# ---------------------------------------------------------------------------
-# aioresponses
-# ---------------------------------------------------------------------------
 handler_type = Callable[[web.Request], Awaitable[web.Response]]
 
 
 class aioresponses:
     """
     Mock aiohttp requests by redirecting DNS to a local aiohttp.web test server.
-
-    Works on sessions that were created *before* the mock context is entered,
-    because:
-      1. Both ThreadedResolver.resolve and AsyncResolver.resolve are patched at
-         the **class** level (Python's MRO lookup finds the patch on every
-         existing instance).
-      2. The connector's DNS cache is cleared on entry so stale entries cannot
-         bypass the patch.
     """
 
     def __init__(
-        self, passthrough: list[str] | None = None, **kwargs: dict[str, Any]
+        self, passthrough: list[str] | None = None, passthrough_unmatched: bool = False, 
+        param: str | None = None, **kwargs: dict[str, Any]
     ) -> None:
+        if kwargs:
+            warnings.warn(
+                "Passing extra parameters to aioresponses via kwargs is deprecated and will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self._passthrough_urls = passthrough or []
         self._passthrough_hosts: list[str] = []
+
         for p in self._passthrough_urls:
             try:
                 host = URL(p).host
@@ -76,16 +73,15 @@ class aioresponses:
             except Exception:
                 self._passthrough_hosts.append(p)
 
-        self._kwargs = kwargs
-        self.param = kwargs.pop("param", None)
-        self.passthrough_unmatched = kwargs.pop("passthrough_unmatched", False)
+        self.param = param
+        self.passthrough_unmatched = passthrough_unmatched
 
-        # {host: (target_ip, target_port)}
         self._host_list: list[str] = []
         self._patterns_list: list[Pattern[str]] = []
 
-        # {path: async handler}
+        # handler are (path, method) → handler or list of handlers (if repeat != True)
         self.handlers: dict[tuple[str, str], handler_type | list[handler_type]] = {}
+        # patterns_handler are (pattern, method) → handler or list of handlers (if repeat != True)
         self.patterns_handler: dict[
             tuple[Pattern[str], str], handler_type | list[handler_type]
         ] = {}
@@ -96,16 +92,13 @@ class aioresponses:
         self.server: TestServer | None = None
         self._patchers: list[Any] = []
 
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
-
     async def __aenter__(self) -> "aioresponses":
-        # Start the real local HTTP server
         app = web.Application()
+        # we add every route to the app.
         app.router.add_route("*", "/{tail:.*}", self._dispatch)
         self.server = TestServer(app)
         await self.server.start_server()
+
         assert isinstance(self.server.host, str) and isinstance(self.server.port, int)  # pyright: ignore[reportUnknownMemberType]
         self.server_host = self.server.host
         self.server_port = self.server.port
@@ -156,9 +149,9 @@ class aioresponses:
 
     async def __aexit__(
         self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[Any],
+        exc_type: Type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
     ) -> None:
         for p in self._patchers:
             p.stop()
@@ -178,7 +171,7 @@ class aioresponses:
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             async with self as m:
                 if self.param:
-                    kwargs[self.param] = m  # pyright: ignore[reportArgumentType]
+                    kwargs[self.param] = m
                 else:
                     if args and hasattr(args[0], f.__name__):
                         args = (args[0], m) + args[1:]
@@ -188,13 +181,10 @@ class aioresponses:
 
         return wrapper
 
-    # ------------------------------------------------------------------
-    # DNS patch
-    # ------------------------------------------------------------------
 
     def _fake_ssl_context(
         self, connector_self: TCPConnector, req: ClientRequest
-    ) -> Optional[SSLContext]:
+    ) -> SSLContext | None:
         """Return None (no TLS) for mocked hosts, real SSL context otherwise."""
         host = req.url.raw_host
         if host in self._host_list or self._match_pattern(str(req.url)):
@@ -235,20 +225,19 @@ class aioresponses:
             original = self._originals_resolver[type(resolver_self)]
             return await original(resolver_self, host, port, family)
 
+        # if no passthrough and no match, we return a redirection to localhost
+        # but will not be any handler registered for it, so it will raise a ClientConnectionError on the other side
         return [
-            {
-                "hostname": host,
-                "host": self.server_host,
-                "port": self.server_port,
-                "family": family,
-                "proto": 0,
-                "flags": 0,
-            }
+            ResolveResult(
+                hostname=host,
+                host=self.server_host,
+                port=self.server_port,
+                family=family,
+                proto=0,
+                flags=0,
+            )
         ]
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _clear_all_connector_caches() -> None:
@@ -256,8 +245,6 @@ class aioresponses:
         Walk every TCPConnector referenced by a live ClientSession and clear
         its DNS cache.  This ensures pre-patch resolutions are not reused.
         """
-        import gc
-
         for obj in gc.get_objects():
             if isinstance(obj, aiohttp.TCPConnector):
                 try:
@@ -265,9 +252,6 @@ class aioresponses:
                 except Exception:
                     pass
 
-    # ------------------------------------------------------------------
-    # Request dispatch (local web server)
-    # ------------------------------------------------------------------
 
     async def _dispatch(self, request: web.Request) -> web.Response:
         key = (request.method.upper(), normalize_url(request.url))
@@ -279,14 +263,10 @@ class aioresponses:
         self.requests[key].append(request)
         selected_handler = self.handlers.get((request.path, request.method))
         if isinstance(selected_handler, list):
-            if len(selected_handler) == 0:
+            if not selected_handler:
                 handler: handler_type | None = None
             else:
-                handler = selected_handler[0]
-                # we remove the first element of the list, so the next request will match the next handler in the list
-                self.handlers[(request.path, request.method)] = self.handlers[
-                    (request.path, request.method)
-                ][1:]
+                handler = typing.cast(handler_type, selected_handler.pop(0))
 
         else:
             handler = selected_handler
@@ -314,24 +294,21 @@ class aioresponses:
             )
         return await handler(request)
 
-    # ------------------------------------------------------------------
-    # Mock registration
-    # ------------------------------------------------------------------
-
     def add(
         self,
-        url: "URL | str | Pattern[str]",
+        url: URL | str | Pattern[str],
         method: str = hdrs.METH_GET,
         status: int = 200,
-        body: "str | bytes" = b"",
-        payload: "dict | None" = None,
-        headers: "dict | None" = None,
-        repeat: "bool | int" = False,
-        content_type: "str | None" = None,
-        callback: "Callable[[web.Request], CallbackResult] | None" = None,
-        reason: Optional[str] = None,
+        body: str | bytes = b"",
+        payload: dict | None = None,
+        headers: dict | None = None,
+        repeat: bool | int = False,
+        content_type: str | None = None,
+        callback: Callable[[URL | Pattern[str]], CallbackResult] | None = None,
+        reason: str | None = None,
         **kwargs,
     ) -> None:
+        method = method.upper()
         if isinstance(url, str):
             url = URL(url)
 
@@ -349,19 +326,13 @@ class aioresponses:
             self._host_list.append(host)
 
         if payload is not None:
-            body = _json.dumps(payload).encode()
+            body = json.dumps(payload).encode()
         elif isinstance(body, str):
             body = body.encode()
 
         resp_headers = dict(headers or {})
         if payload is not None and "Content-Type" not in resp_headers:
             content_type = "application/json"
-
-        self._body = body
-        self._status = status
-        self._headers = resp_headers
-        self._method = method.upper()
-        self._reason = reason
 
         async def handler(request: web.Request) -> web.Response:
             if callable(callback):
@@ -373,7 +344,7 @@ class aioresponses:
                 _body = result.body
                 _headers = result.headers or {}
                 if result.payload is not None:
-                    _body = _json.dumps(result.payload).encode()
+                    _body = json.dumps(result.payload).encode()
                 _content_type = result.content_type
                 _reason = result.reason
             else:
@@ -393,25 +364,42 @@ class aioresponses:
 
         if repeat is True:
             if isinstance(url, Pattern):
-                self.patterns_handler[url] = handler
+                self.patterns_handler[url, method] = handler
                 return
             path = url.path or "/"
-            self.handlers[path, self._method] = handler
+            self.handlers[path, method] = handler
         else:
             if repeat is False:
                 repeat = 1
-            handlers = [handler] * repeat
+            handlers: list[handler_type] = [handler] * repeat
             if isinstance(url, Pattern):
-                if self.patterns_handler.get((url, self._method)):
-                    self.patterns_handler[url, self._method] += handlers
+                if (url, method) in self.patterns_handler:
+                    list_pattern_handler = self.patterns_handler[(url, method)]
+                    if isinstance(list_pattern_handler, list):
+                        list_pattern_handler = typing.cast(
+                            list[handler_type], list_pattern_handler
+                        )
+                        list_pattern_handler += handlers
+                    else:
+                        raise ValueError(
+                            f"Existing handler for pattern {url} {method} has repeat=True, cannot add more handlers to it."
+                        )
+
                 else:
-                    self.patterns_handler[url, self._method] = handlers
+                    self.patterns_handler[url, method] = handlers
                 return
             path = url.path or "/"
-            if self.handlers.get((path, self._method)):
-                self.handlers[path, self._method] += handlers
+            if (path, method) in self.handlers:
+                handlers_list = self.handlers[(path, method)]
+                if isinstance(handlers_list, list):
+                    handlers_list = typing.cast(list[handler_type], handlers_list)
+                    handlers_list += handlers
+                else:
+                    raise ValueError(
+                        f"Existing handler for {path} {method} has repeat=True, cannot add more handlers to it."
+                    )
             else:
-                self.handlers[path, self._method] = handlers
+                self.handlers[path, method] = handlers
 
     def get(self, url, **kwargs):
         self.add(url, method=hdrs.METH_GET, **kwargs)
@@ -434,9 +422,6 @@ class aioresponses:
     def options(self, url, **kwargs):
         self.add(url, method=hdrs.METH_OPTIONS, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Assertions
-    # ------------------------------------------------------------------
 
     def assert_called(self):
         if not self.requests:
@@ -455,9 +440,9 @@ class aioresponses:
 
     def assert_any_call(
         self,
-        url: "URL | str",
+        url: URL | str,
         method: str = hdrs.METH_GET,
-        params: "dict | None" = None,
+        params: dict[str, str] | None = None,
     ):
         url = normalize_url(merge_params(url, params))
         key = (method.upper(), url)
@@ -466,11 +451,11 @@ class aioresponses:
 
     def assert_called_with(
         self,
-        url: "URL | str",
+        url: URL | str,
         method: str = hdrs.METH_GET,
-        params: "dict | None" = None,
-        data: "str | bytes | dict | None" = None,
-        headers: "dict | None" = None,
+        params: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ):
         url = normalize_url(merge_params(url, params))
         key = (method.upper(), url)
@@ -481,10 +466,8 @@ class aioresponses:
             actual_body = getattr(request, "_captured_body", b"")
             if isinstance(data, dict):
                 # aiohttp may send dicts as form-encoded or JSON; try both.
-                from urllib.parse import urlencode, parse_qs
-
                 form_encoded = urlencode(data).encode()
-                json_encoded = _json.dumps(data).encode()
+                json_encoded = json.dumps(data).encode()
                 # Also accept order-insensitive form comparison
                 actual_qs = parse_qs(actual_body.decode(errors="replace"))
                 expected_qs = parse_qs(urlencode(data))
@@ -524,11 +507,11 @@ class aioresponses:
 
     def assert_called_once_with(
         self,
-        url: "URL | str",
+        url: URL | str,
         method: str = hdrs.METH_GET,
-        params: "dict | None" = None,
-        data: "str | bytes | dict | None" = None,
-        headers: "dict | None" = None,
+        params: dict[str, str] | None = None,
+        data: str | bytes | dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ):
         self.assert_called_once()
         self.assert_called_with(url, method, params, data, headers)

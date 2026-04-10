@@ -1,6 +1,5 @@
 import asyncio
 import re
-from asyncio import CancelledError, TimeoutError
 from collections.abc import Coroutine, Generator
 from random import uniform
 from unittest.mock import patch
@@ -9,21 +8,19 @@ import pytest
 from aiohttp import hdrs, http
 from aiohttp.client import ClientSession
 from aiohttp.client_reqrep import ClientResponse
-from ddt import data, ddt, unpack
+from ddt import data, ddt, unpack  # type: ignore[import-untyped]
 from yarl import URL
 
 try:
-    from aiohttp.errors import (
+    from aiohttp.errors import (  # type: ignore[import-not-found]
         ClientConnectionError,
         ClientResponseError,
-        HttpProcessingError,
     )
 except ImportError:
-    from aiohttp.client_exceptions import (
+    from aiohttp.client_exceptions import (  # type: ignore[import-not-found]
         ClientConnectionError,
         ClientResponseError,
     )
-    from aiohttp.http_exceptions import HttpProcessingError
 
 from aioresponses import CallbackResult, aioresponses
 
@@ -625,7 +622,7 @@ class AIOResponseRedirectTest(AsyncTestCase):
             status=307,
             headers={"Location": "https://httpbin.org"},
         )
-        with self.assertRaises(ClientConnectionError) as cm:
+        with self.assertRaises(ClientConnectionError):
             await self.session.get(self.url, allow_redirects=True)
 
     @aioresponses()
