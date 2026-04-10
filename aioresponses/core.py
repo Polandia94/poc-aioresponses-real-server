@@ -228,14 +228,14 @@ class aioresponses:
         # if no passthrough and no match, we return a redirection to localhost
         # but will not be any handler registered for it, so it will raise a ClientConnectionError on the other side
         return [
-            {
-                "hostname": host,
-                "host": self.server_host,
-                "port": self.server_port,
-                "family": family,
-                "proto": 0,
-                "flags": 0,
-            }
+            ResolveResult(
+                hostname=host,
+                host=self.server_host,
+                port=self.server_port,
+                family=family,
+                proto=0,
+                flags=0,
+            )
         ]
 
 
@@ -263,14 +263,10 @@ class aioresponses:
         self.requests[key].append(request)
         selected_handler = self.handlers.get((request.path, request.method))
         if isinstance(selected_handler, list):
-            if len(selected_handler) == 0:
+            if not selected_handler:
                 handler: handler_type | None = None
             else:
-                handler = selected_handler[0]
-                # we remove the first element of the list, so the next request will match the next handler in the list
-                self.handlers[(request.path, request.method)] = self.handlers[  # type: ignore[index]
-                    (request.path, request.method)
-                ][1:]
+                handler = typing.cast(handler_type, selected_handler.pop(0))
 
         else:
             handler = selected_handler
@@ -312,6 +308,7 @@ class aioresponses:
         reason: str | None = None,
         **kwargs,
     ) -> None:
+        method = method.upper()
         if isinstance(url, str):
             url = URL(url)
 
@@ -336,12 +333,6 @@ class aioresponses:
         resp_headers = dict(headers or {})
         if payload is not None and "Content-Type" not in resp_headers:
             content_type = "application/json"
-
-        self._body = body
-        self._status = status
-        self._headers = resp_headers
-        self._method = method.upper()
-        self._reason = reason
 
         async def handler(request: web.Request) -> web.Response:
             if callable(callback):
@@ -373,19 +364,17 @@ class aioresponses:
 
         if repeat is True:
             if isinstance(url, Pattern):
-                self.patterns_handler[url, self._method] = handler
+                self.patterns_handler[url, method] = handler
                 return
             path = url.path or "/"
-            self.handlers[path, self._method] = handler
+            self.handlers[path, method] = handler
         else:
             if repeat is False:
                 repeat = 1
             handlers: list[handler_type] = [handler] * repeat
             if isinstance(url, Pattern):
-                if self.patterns_handler.get((url, self._method)):
-                    list_pattern_handler = self.patterns_handler.get(
-                        (url, self._method)
-                    )
+                if (url, method) in self.patterns_handler:
+                    list_pattern_handler = self.patterns_handler[(url, method)]
                     if isinstance(list_pattern_handler, list):
                         list_pattern_handler = typing.cast(
                             list[handler_type], list_pattern_handler
@@ -393,24 +382,24 @@ class aioresponses:
                         list_pattern_handler += handlers
                     else:
                         raise ValueError(
-                            f"Existing handler for pattern {url} {self._method} has repeat=True, cannot add more handlers to it."
+                            f"Existing handler for pattern {url} {method} has repeat=True, cannot add more handlers to it."
                         )
 
                 else:
-                    self.patterns_handler[url, self._method] = handlers
+                    self.patterns_handler[url, method] = handlers
                 return
             path = url.path or "/"
-            if self.handlers.get((path, self._method)):
-                handlers_list = self.handlers.get((path, self._method))
+            if (path, method) in self.handlers:
+                handlers_list = self.handlers[(path, method)]
                 if isinstance(handlers_list, list):
                     handlers_list = typing.cast(list[handler_type], handlers_list)
                     handlers_list += handlers
                 else:
                     raise ValueError(
-                        f"Existing handler for {path} {self._method} has repeat=True, cannot add more handlers to it."
+                        f"Existing handler for {path} {method} has repeat=True, cannot add more handlers to it."
                     )
             else:
-                self.handlers[path, self._method] = handlers
+                self.handlers[path, method] = handlers
 
     def get(self, url, **kwargs):
         self.add(url, method=hdrs.METH_GET, **kwargs)
