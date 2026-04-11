@@ -3,17 +3,18 @@ from functools import wraps
 from re import Pattern
 import typing
 from unittest.mock import patch
-import json
+import json as json_module
 import inspect
 import warnings
 import gc
-from urllib.parse import urlencode, parse_qs
+from urllib.parse import parse_qs
 
 
 import aiohttp
 from aiohttp import ClientRequest, ClientResponse, web, hdrs
 from aiohttp.abc import AbstractResolver, ResolveResult
 from aiohttp.connector import SSLContext, TCPConnector
+from aiohttp.formdata import FormData
 from aiohttp.resolver import ThreadedResolver, AsyncResolver
 from aiohttp.test_utils import TestServer
 from aiohttp.web_request import Request
@@ -23,7 +24,8 @@ from .compat import merge_params, normalize_url
 
 
 class CallbackResult:
-    """ Result object return by a callback """
+    """Result object return by a callback"""
+
     def __init__(
         self,
         method: str = hdrs.METH_GET,
@@ -44,6 +46,7 @@ class CallbackResult:
         self.response_class = response_class
         self.reason = reason
 
+
 handler_type = Callable[[web.Request], Awaitable[web.Response]]
 
 
@@ -53,8 +56,11 @@ class aioresponses:
     """
 
     def __init__(
-        self, passthrough: list[str] | None = None, passthrough_unmatched: bool = False, 
-        param: str | None = None, **kwargs: dict[str, Any]
+        self,
+        passthrough: list[str] | None = None,
+        passthrough_unmatched: bool = False,
+        param: str | None = None,
+        **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
             warnings.warn(
@@ -181,7 +187,6 @@ class aioresponses:
 
         return wrapper
 
-
     def _fake_ssl_context(
         self, connector_self: TCPConnector, req: ClientRequest
     ) -> SSLContext | None:
@@ -194,9 +199,9 @@ class aioresponses:
         original = self._original_ssl_context
         return original(connector_self, req)
 
-    def _match_pattern(self, host: str) -> bool:
+    def _match_pattern(self, url: str) -> bool:
         for pattern in self._patterns_list:
-            if pattern.match(host):
+            if pattern.match(url):
                 return True
         return False
 
@@ -208,7 +213,8 @@ class aioresponses:
         family: socket.AddressFamily = socket.AF_INET,
     ) -> list[ResolveResult]:
         """Replacement for resolver.resolve() on both resolver classes."""
-        if host in self._host_list or self._match_pattern(host):
+        # if there is pattern, we always match, because we dont have full url
+        if host in self._host_list or self._patterns_list:
             return [
                 ResolveResult(
                     hostname=host,
@@ -238,7 +244,6 @@ class aioresponses:
             )
         ]
 
-
     @staticmethod
     def _clear_all_connector_caches() -> None:
         """
@@ -251,7 +256,6 @@ class aioresponses:
                     obj.clear_dns_cache()
                 except Exception:
                     pass
-
 
     async def _dispatch(self, request: web.Request) -> web.Response:
         key = (request.method.upper(), normalize_url(request.url))
@@ -271,9 +275,16 @@ class aioresponses:
         else:
             handler = selected_handler
         if handler is None:
+            # Reconstruct the original URL: aiohttp always sends the original Host header,
+            # but request.url reflects the local TestServer address. Try both schemes.
+            original_host = request.headers.get("Host", request.url.host)
+            original_urls = [
+                f"https://{original_host}{request.path_qs}",
+                f"http://{original_host}{request.path_qs}",
+            ]
             # Check if there's a pattern handler for this request
             for (pattern, method), pattern_handler in self.patterns_handler.items():
-                if pattern.match(str(request.url)) and method == request.method:
+                if any(pattern.match(u) for u in original_urls) and method == request.method:
                     if isinstance(pattern_handler, list):
                         handler = pattern_handler[0]
                         remaining = pattern_handler[1:]
@@ -300,6 +311,7 @@ class aioresponses:
         method: str = hdrs.METH_GET,
         status: int = 200,
         body: str | bytes = b"",
+        json: Any = None,
         payload: dict | None = None,
         headers: dict | None = None,
         repeat: bool | int = False,
@@ -325,10 +337,15 @@ class aioresponses:
             # Map this host → our test server
             self._host_list.append(host)
 
-        if payload is not None:
-            body = json.dumps(payload).encode()
+        if json is not None:
+            body = json_module.dumps(json).encode()
+            content_type = "application/json"
+        elif payload is not None:
+            body = json_module.dumps(payload).encode()
         elif isinstance(body, str):
             body = body.encode()
+            if content_type is None:
+                content_type = "application/json"
 
         resp_headers = dict(headers or {})
         if payload is not None and "Content-Type" not in resp_headers:
@@ -344,7 +361,7 @@ class aioresponses:
                 _body = result.body
                 _headers = result.headers or {}
                 if result.payload is not None:
-                    _body = json.dumps(result.payload).encode()
+                    _body = json_module.dumps(result.payload).encode()
                 _content_type = result.content_type
                 _reason = result.reason
             else:
@@ -422,7 +439,6 @@ class aioresponses:
     def options(self, url, **kwargs):
         self.add(url, method=hdrs.METH_OPTIONS, **kwargs)
 
-
     def assert_called(self):
         if not self.requests:
             raise AssertionError("Expected at least one call, got none.")
@@ -455,6 +471,7 @@ class aioresponses:
         method: str = hdrs.METH_GET,
         params: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
+        json: Any = None,
         headers: dict[str, str] | None = None,
     ):
         url = normalize_url(merge_params(url, params))
@@ -462,22 +479,24 @@ class aioresponses:
         if key not in self.requests:
             raise AssertionError(f"No calls to {method.upper()} {url}")
         request = self.requests[key][0]  # check the first call
-        if data is not None:
-            actual_body = getattr(request, "_captured_body", b"")
+        actual_body = getattr(request, "_captured_body", b"")
+        if json is not None:
+            # aiohttp sends json= as JSON-encoded bytes with application/json
+            expected_body = json_module.dumps(json).encode()
+            assert actual_body == expected_body, (
+                f"Expected JSON body {json!r}, got {actual_body!r}"
+            )
+        elif data is not None:
             if isinstance(data, dict):
-                # aiohttp may send dicts as form-encoded or JSON; try both.
-                form_encoded = urlencode(data).encode()
-                json_encoded = json.dumps(data).encode()
-                # Also accept order-insensitive form comparison
+                # aiohttp sends data=dict via FormData as application/x-www-form-urlencoded.
+                # Use FormData to produce the exact same encoding aiohttp does.
+                form_encoded = FormData(data)()._value  # type: ignore[attr-defined]
+                # Accept order-insensitive comparison via parse_qs
                 actual_qs = parse_qs(actual_body.decode(errors="replace"))
-                expected_qs = parse_qs(urlencode(data))
-                match = (
-                    actual_body == form_encoded
-                    or actual_body == json_encoded
-                    or actual_qs == expected_qs
-                )
+                expected_qs = parse_qs(form_encoded.decode())
+                match = actual_body == form_encoded or actual_qs == expected_qs
                 assert match, (
-                    f"Expected body {data!r} (form or JSON encoded), got {actual_body!r}"
+                    f"Expected body {data!r} (form encoded), got {actual_body!r}"
                 )
             else:
                 if isinstance(data, str):
@@ -488,10 +507,12 @@ class aioresponses:
                     f"Expected body {expected_body!r}, got {actual_body!r}"
                 )
         actual_headers = dict(request.headers)
-        # we remove the headers added by aiohttp if there are not specified in the expected headers
+        # Strip headers that aiohttp adds automatically, unless the caller
+        # explicitly wants to assert them.
         for header in (
             "Content-Length",
             "Content-Type",
+            "Transfer-Encoding",
             "Host",
             "Accept",
             "Accept-Encoding",
@@ -511,7 +532,8 @@ class aioresponses:
         method: str = hdrs.METH_GET,
         params: dict[str, str] | None = None,
         data: str | bytes | dict[str, Any] | None = None,
+        json: Any = None,
         headers: dict[str, str] | None = None,
     ):
         self.assert_called_once()
-        self.assert_called_with(url, method, params, data, headers)
+        self.assert_called_with(url, method, params, data, json, headers)
