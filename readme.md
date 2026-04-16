@@ -37,7 +37,7 @@ to:
 
 @pytest_asyncio.fixture
 async def mock_aioresponse():
-    async with aioresponses() as m:
+    async with aiointercept() as m:
         yield m
 
 is passing the tests on:
