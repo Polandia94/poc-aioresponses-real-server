@@ -1,11 +1,14 @@
 [project]
 name = "aiointercept"
 version = "0.1.0"
-description = ""
+description = "aiohttp test mocking via a real local server and DNS redirection"
 authors = [
     {name = "Pablo Estevez",email = "pablo22estevez@gmail.com"}
 ]
+license = {text = "MIT"}
 readme = "README.md"
+homepage = "https://github.com/Polandia94/aiointercept"
+repository = "https://github.com/Polandia94/aiointercept"
 requires-python = ">=3.10"
 dependencies = [
     "yarl (>=1.23.0,<2.0.0)",

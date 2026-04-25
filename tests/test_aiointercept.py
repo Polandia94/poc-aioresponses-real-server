@@ -524,6 +524,23 @@ async def test_clear_resets_state():
             assert len(m.handlers) == 0
 
 
+async def test_clear_allows_reregistering():
+    """After clear(), new handlers can be registered and matched independently."""
+    url = "http://example.com/clear-reuse"
+    async with ClientSession() as session:
+        async with aiointercept(mock_external_urls=True) as m:
+            m.get(url, status=200)
+            resp = await session.get(url)
+            assert resp.status == 200
+
+            m.clear()
+
+            m.get(url, status=201)
+            resp = await session.get(url)
+            assert resp.status == 201
+            m.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Decorator usage
 # ---------------------------------------------------------------------------
