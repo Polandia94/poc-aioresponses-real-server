@@ -6,14 +6,18 @@ Unlike `aioresponses`, which patches `aiohttp` internals to short-circuit reques
 
 ## Installation
 
+> **Note:** `aiointercept` has not yet been published to PyPI. Until v0.1.0 is released, install directly from the repository:
+>
+> ```bash
+> pip install git+https://github.com/Polandia94/aiointercept.git
+> uv add git+https://github.com/Polandia94/aiointercept.git
+> ```
+>
+> Once published on PyPI:
+
 ```bash
-# pip
 pip install aiointercept
-
-# uv
 uv add aiointercept
-
-# poetry
 poetry add aiointercept
 ```
 
@@ -21,6 +25,7 @@ poetry add aiointercept
 
 - Python ≥ 3.10
 - aiohttp ≥ 3.13
+- pytest-asyncio (for pytest usage)
 
 ## Usage
 
@@ -131,7 +136,7 @@ async with aiointercept(mock_external_urls=True) as m:
         assert resp.status == 200
 ```
 
-> **Note:** DNS patching is global for the duration of the `async with` block. Prefer `mock_external_urls=False` unless you have no other option.
+> **Note:** DNS patching is global for the duration of the `async with` block, and does **not** work for requests to bare IP addresses (e.g. `http://1.2.3.4/path`). Prefer `mock_external_urls=False` unless you have no other option.
 
 ## Registering mock responses
 
@@ -215,7 +220,58 @@ async def async_callback(url, **kwargs):
 m.get("http://example.com/async", callback=async_callback)
 ```
 
-`CallbackResult` fields: `status`, `body`, `payload`, `headers`, `content_type`, `reason`.
+### `CallbackResult` fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `status` | `int` | `200` | HTTP response status code |
+| `body` | `str \| bytes` | `""` | Raw response body |
+| `payload` | `Any` | `None` | Response body as JSON (serialized automatically; accepts dict, list, scalar) |
+| `headers` | `dict[str, str] \| None` | `None` | Extra response headers |
+| `content_type` | `str` | `"application/json"` | Content-Type header value |
+| `reason` | `str \| None` | `None` | HTTP reason phrase |
+
+## Instance attributes
+
+### `m.server_url`
+
+The base URL of the local test server, e.g. `"http://127.0.0.1:8765"`. Available inside the `async with` block. Use this with `mock_external_urls=False` to point your client at the mock server:
+
+```python
+async with aiointercept(mock_external_urls=False) as m:
+    base = m.server_url   # e.g. "http://127.0.0.1:54321"
+```
+
+### `m.requests`
+
+A dict mapping `(METHOD: str, URL: yarl.URL)` to a list of intercepted `aiohttp.web.Request` objects:
+
+```python
+from yarl import URL
+
+key = ("GET", URL("http://example.com/api"))
+requests = m.requests[key]      # list of web.Request objects, one per call
+first = requests[0]
+
+first.headers["User-Agent"]     # request headers
+first.kwargs["json"]            # parsed JSON body (dict), if Content-Type was application/json
+first.kwargs["query"]           # query string as dict[str, str]
+first.kwargs["headers"]         # raw request headers dict
+```
+
+The URL key is normalized (fragment stripped, query parameters sorted) so `http://example.com/?b=2&a=1` and `http://example.com/?a=1&b=2` map to the same key.
+
+### `m.clear()`
+
+Resets all registered handlers and recorded requests. Useful when reusing a mock instance across multiple test cases:
+
+```python
+m.get("http://example.com/a", status=200)
+# ... run test ...
+m.clear()
+m.get("http://example.com/a", status=404)
+# ... run next test ...
+```
 
 ## Accessing recorded requests
 
@@ -275,6 +331,43 @@ async with aiointercept(True, passthrough_unmatched=True) as m:
 When `mock_external_urls=True`, `aiointercept` patches `TCPConnector._get_ssl_context` to return `None` (no TLS) for intercepted hosts and injects an `X-Aiointercept-Orig-Scheme: https` header so the server-side `_dispatch` can reconstruct the original `https://` URL for handler lookup and request recording.
 
 For passthrough requests under the HTTPS + pattern scenario, a `_BypassConnector` with an unpatched `_get_ssl_context` is used so real TLS is negotiated for the proxied connection.
+
+## Migrating from aioresponses
+
+`aiointercept` is designed to be a drop-in replacement for `aioresponses` in most cases. The main differences:
+
+### Async context manager
+
+`aioresponses` uses a sync context manager; `aiointercept` requires `async with`:
+
+```python
+# aioresponses
+with aioresponses() as m:
+    ...
+
+# aiointercept
+async with aiointercept(mock_external_urls=True) as m:
+    ...
+```
+
+### pytest-asyncio required
+
+Because the context manager is async, your tests must be `async def` and run under an async test runner. With pytest, add `pytest-asyncio` and set `asyncio_mode = "auto"` in `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
+### `exception=` is not supported
+
+`aioresponses` lets you raise arbitrary exceptions. `aiointercept` only surfaces `ClientConnectionError` (via `exception=True`).
+
+### DNS-patch caveat
+
+`mock_external_urls=True` patches `ThreadedResolver` / `AsyncResolver` at the class level for the duration of the block. This means:
+
+- Bare IP addresses (`http://1.2.3.4/path`) are **not** intercepted.
 
 ## Differences from aioresponses
 

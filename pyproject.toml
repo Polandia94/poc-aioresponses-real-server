@@ -5,7 +5,10 @@ description = "aiohttp mock library that routes requests through a real test ser
 authors = [
     {name = "Pablo Estevez",email = "pablo22estevez@gmail.com"}
 ]
+license = {text = "MIT"}
 readme = "README.md"
+homepage = "https://github.com/Polandia94/aiointercept"
+repository = "https://github.com/Polandia94/aiointercept"
 requires-python = ">=3.10"
 keywords = ["aiohttp", "mock", "testing", "pytest", "asyncio", "aioresponses"]
 classifiers = [

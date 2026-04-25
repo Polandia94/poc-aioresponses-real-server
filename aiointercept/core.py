@@ -7,14 +7,13 @@ import json as json_module
 import inspect
 import warnings
 import gc
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 import logging
 
 import aiohttp
 from aiohttp import ClientRequest, ClientResponse, web, hdrs
 from aiohttp.abc import AbstractResolver, ResolveResult
 from aiohttp.connector import SSLContext, TCPConnector
-from aiohttp.formdata import FormData
 from aiohttp.resolver import ThreadedResolver, AsyncResolver
 from aiohttp.test_utils import TestServer
 from aiohttp.web_request import Request
@@ -131,7 +130,7 @@ class CallbackResult:
         status: int = 200,
         body: str | bytes = "",
         content_type: str = "application/json",
-        payload: dict[str, str] | None = None,
+        payload: Any = None,
         headers: dict[str, str] | None = None,
         response_class: Type[ClientResponse] | None = None,
         reason: str | None = None,
@@ -146,7 +145,7 @@ class CallbackResult:
         self.reason = reason
 
 
-handler_type = Callable[[web.Request], Awaitable[web.Response]]
+handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 class aiointercept:
@@ -195,6 +194,7 @@ class aiointercept:
         self.requests: dict[tuple[str, URL], list[Request]] = {}
 
         self.server: TestServer | None = None
+        self._bypass_session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> "aiointercept":
         app = web.Application()
@@ -225,6 +225,7 @@ class aiointercept:
                     TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
                 _patch_refcount += 1
             self._clear_all_connector_caches()
+            self._bypass_session = self._make_bypass_session()
 
         return self
 
@@ -250,6 +251,9 @@ class aiointercept:
                     _real_threaded_resolve = None
                     _real_async_resolve = None
                     _real_ssl_context = None
+        if self._bypass_session:
+            await self._bypass_session.close()
+            self._bypass_session = None
         if self.server:
             await self.server.close()
             self.server = None
@@ -273,6 +277,27 @@ class aiointercept:
 
         return wrapper
 
+    def _make_bypass_session(self) -> aiohttp.ClientSession:
+        _orig_resolve = _real_threaded_resolve
+        _orig_ssl_ctx = _real_ssl_context
+
+        class _BypassResolver(ThreadedResolver):
+            async def resolve(
+                self,
+                host: str,
+                port: int = 0,
+                family: socket.AddressFamily = socket.AF_INET,
+            ) -> list[ResolveResult]:
+                return await _orig_resolve(self, host, port, family)
+
+        class _BypassConnector(aiohttp.TCPConnector):
+            def _get_ssl_context(self, req: ClientRequest) -> SSLContext | None:
+                return _orig_ssl_ctx(self, req)  # pyright: ignore[reportPrivateUsage]
+
+        return aiohttp.ClientSession(
+            connector=_BypassConnector(resolver=_BypassResolver())
+        )
+
     def _match_pattern(self, url: str) -> bool:
         return any(p.match(url) for p in self._patterns_list)
 
@@ -290,7 +315,7 @@ class aiointercept:
             except Exception:
                 pass
 
-    async def _dispatch(self, request: web.Request) -> web.Response:
+    async def _dispatch(self, request: web.Request) -> web.StreamResponse:
         url = normalize_url(request.url)
         if request.headers.get("X-Aiointercept-Orig-Scheme") == "https":
             url = url.with_scheme("https")
@@ -358,46 +383,29 @@ class aiointercept:
                     "https" if request.secure else "http"
                 )
                 real_url = f"{scheme}://{original_host}{request.path_qs}"
-                _orig_resolve = _real_threaded_resolve
-                _orig_ssl_ctx = _real_ssl_context
-
-                class _BypassResolver(ThreadedResolver):
-                    async def resolve(
-                        self,
-                        host: str,
-                        port: int = 0,
-                        family: socket.AddressFamily = socket.AF_INET,
-                    ) -> list[ResolveResult]:
-                        return await _orig_resolve(self, host, port, family)
-
-                class _BypassConnector(aiohttp.TCPConnector):
-                    def _get_ssl_context(self, req: ClientRequest) -> SSLContext | None:
-                        return _orig_ssl_ctx(self, req)  # pyright: ignore[reportPrivateUsage]
-
-                connector = _BypassConnector(resolver=_BypassResolver())
-                async with aiohttp.ClientSession(connector=connector) as session:
-                    async with session.request(
-                        method=request.method,
-                        url=real_url,
+                session = self._bypass_session or self._make_bypass_session()
+                async with session.request(
+                    method=request.method,
+                    url=real_url,
+                    headers={
+                        k: v
+                        for k, v in request.headers.items()
+                        if k.lower() not in _PROXY_REQ_DROP
+                    },
+                    data=getattr(request, "_captured_body", None) or None,
+                    allow_redirects=True,
+                    ssl=True,
+                ) as real_resp:
+                    body = await real_resp.read()
+                    return web.Response(
+                        status=real_resp.status,
                         headers={
                             k: v
-                            for k, v in request.headers.items()
-                            if k.lower() not in _PROXY_REQ_DROP
+                            for k, v in real_resp.headers.items()
+                            if k.lower() not in _PROXY_RESP_DROP
                         },
-                        data=getattr(request, "_captured_body", None) or None,
-                        allow_redirects=True,
-                        ssl=True,
-                    ) as real_resp:
-                        body = await real_resp.read()
-                        return web.Response(
-                            status=real_resp.status,
-                            headers={
-                                k: v
-                                for k, v in real_resp.headers.items()
-                                if k.lower() not in _PROXY_RESP_DROP
-                            },
-                            body=body,
-                        )
+                        body=body,
+                    )
             # this should raise ClientConnectionError on the other side
             if request.transport:
                 request.transport.close()
@@ -413,11 +421,12 @@ class aiointercept:
         status: int = 200,
         body: str | bytes = b"",
         json: Any = None,
-        payload: dict | None = None,
+        payload: Any = None,
         headers: dict | None = None,
         repeat: bool | int = False,
         content_type: str | None = None,
-        callback: Callable[[URL | Pattern[str]], CallbackResult] | None = None,
+        callback: Callable[..., CallbackResult | Awaitable[CallbackResult]]
+        | None = None,
         reason: str | None = None,
         exception: Exception | bool | None = None,
         **kwargs,
@@ -663,14 +672,9 @@ class aiointercept:
                         f"application/x-www-form-urlencoded, got {actual_ct!r}. "
                         f"Use json= for JSON bodies."
                     )
-                # aiohttp sends data=dict via FormData as application/x-www-form-urlencoded.
-                # Use FormData to produce the exact same encoding aiohttp does.
-                form_encoded = FormData(data)()._value  # type: ignore[attr-defined]
-                # Accept order-insensitive comparison via parse_qs
                 actual_qs = parse_qs(actual_body.decode(errors="replace"))
-                expected_qs = parse_qs(form_encoded.decode())
-                match = actual_body == form_encoded or actual_qs == expected_qs
-                assert match, (
+                expected_qs = parse_qs(urlencode(sorted(data.items())))
+                assert actual_qs == expected_qs, (
                     f"Expected body {data!r} (form encoded), got {actual_body!r}"
                 )
             else:
