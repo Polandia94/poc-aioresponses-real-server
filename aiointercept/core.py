@@ -184,6 +184,7 @@ class aiointercept:
         self.requests: dict[tuple[str, URL], list[Request]] = {}
 
         self.server: TestServer | None = None
+        self._bypass_session: aiohttp.ClientSession | None = None
 
     async def __aenter__(self) -> "aiointercept":
         app = web.Application()
@@ -214,6 +215,7 @@ class aiointercept:
                     TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
                 _patch_refcount += 1
             self._clear_all_connector_caches()
+            self._bypass_session = self._make_bypass_session()
 
         return self
 
@@ -239,6 +241,9 @@ class aiointercept:
                     _real_threaded_resolve = None
                     _real_async_resolve = None
                     _real_ssl_context = None
+        if self._bypass_session:
+            await self._bypass_session.close()
+            self._bypass_session = None
         if self.server:
             await self.server.close()
             self.server = None
@@ -261,6 +266,27 @@ class aiointercept:
                 return await f(*args, **kwargs)
 
         return wrapper
+
+    def _make_bypass_session(self) -> aiohttp.ClientSession:
+        _orig_resolve = _real_threaded_resolve
+        _orig_ssl_ctx = _real_ssl_context
+
+        class _BypassResolver(ThreadedResolver):
+            async def resolve(
+                self,
+                host: str,
+                port: int = 0,
+                family: socket.AddressFamily = socket.AF_INET,
+            ) -> list[ResolveResult]:
+                return await _orig_resolve(self, host, port, family)
+
+        class _BypassConnector(aiohttp.TCPConnector):
+            def _get_ssl_context(self, req: ClientRequest) -> SSLContext | None:
+                return _orig_ssl_ctx(self, req)  # pyright: ignore[reportPrivateUsage]
+
+        return aiohttp.ClientSession(
+            connector=_BypassConnector(resolver=_BypassResolver())
+        )
 
     def _match_pattern(self, url: str) -> bool:
         return any(p.match(url) for p in self._patterns_list)
@@ -347,46 +373,29 @@ class aiointercept:
                     "https" if request.secure else "http"
                 )
                 real_url = f"{scheme}://{original_host}{request.path_qs}"
-                _orig_resolve = _real_threaded_resolve
-                _orig_ssl_ctx = _real_ssl_context
-
-                class _BypassResolver(ThreadedResolver):
-                    async def resolve(
-                        self,
-                        host: str,
-                        port: int = 0,
-                        family: socket.AddressFamily = socket.AF_INET,
-                    ) -> list[ResolveResult]:
-                        return await _orig_resolve(self, host, port, family)
-
-                class _BypassConnector(aiohttp.TCPConnector):
-                    def _get_ssl_context(self, req: ClientRequest) -> SSLContext | None:
-                        return _orig_ssl_ctx(self, req)  # pyright: ignore[reportPrivateUsage]
-
-                connector = _BypassConnector(resolver=_BypassResolver())
-                async with aiohttp.ClientSession(connector=connector) as session:
-                    async with session.request(
-                        method=request.method,
-                        url=real_url,
+                session = self._bypass_session or self._make_bypass_session()
+                async with session.request(
+                    method=request.method,
+                    url=real_url,
+                    headers={
+                        k: v
+                        for k, v in request.headers.items()
+                        if k.lower() not in _PROXY_REQ_DROP
+                    },
+                    data=getattr(request, "_captured_body", None) or None,
+                    allow_redirects=True,
+                    ssl=True,
+                ) as real_resp:
+                    body = await real_resp.read()
+                    return web.Response(
+                        status=real_resp.status,
                         headers={
                             k: v
-                            for k, v in request.headers.items()
-                            if k.lower() not in _PROXY_REQ_DROP
+                            for k, v in real_resp.headers.items()
+                            if k.lower() not in _PROXY_RESP_DROP
                         },
-                        data=getattr(request, "_captured_body", None) or None,
-                        allow_redirects=True,
-                        ssl=True,
-                    ) as real_resp:
-                        body = await real_resp.read()
-                        return web.Response(
-                            status=real_resp.status,
-                            headers={
-                                k: v
-                                for k, v in real_resp.headers.items()
-                                if k.lower() not in _PROXY_RESP_DROP
-                            },
-                            body=body,
-                        )
+                        body=body,
+                    )
             # this should raise ClientConnectionError on the other side
             if request.transport:
                 request.transport.close()
