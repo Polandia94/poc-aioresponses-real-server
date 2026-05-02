@@ -2,5 +2,22 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "minimumReleaseAge": "7 days",
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "Disable updates for main project dependencies",
+      "matchManagers": ["uv"],
+      "matchDepTypes": ["dependencies"],
+      "enabled": false
+    },
+    {
+      "description": "Pin GitHub Actions to commit SHA digest",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    }
   ]
 }
