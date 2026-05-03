@@ -11,6 +11,7 @@ import asyncio
 from random import uniform
 
 from aiointercept import aiointercept, CallbackResult
+from tests.conftest import network_retry
 
 # ---------------------------------------------------------------------------
 # Basic mock_external_urls=True (DNS patched) vs False (direct to server)
@@ -285,6 +286,7 @@ async def test_callback_with_payload():
 # ---------------------------------------------------------------------------
 
 
+@network_retry
 async def test_passthrough_host_is_allowed():
     """Passthrough host resolves normally (hits real network)."""
     async with ClientSession() as session:
@@ -312,6 +314,7 @@ async def test_registered_host_missing_path_raises():
 # ---------------------------------------------------------------------------
 
 
+@network_retry
 async def test_passthrough_unmatched_allows_real_requests():
     """Requests without a registered handler pass through to the network."""
     async with ClientSession() as session:
@@ -336,6 +339,7 @@ async def test_passthrough_unmatched_false_raises_for_unknown():
                 await session.get("http://unregistered.test/foo")
 
 
+@network_retry
 async def test_passthrough_unmatched_with_pattern_proxies_unmatched():
     """
     With a pattern registered, DNS redirects ALL hosts to the test server.
@@ -847,6 +851,7 @@ async def test_mock_https_url():
             assert await resp.read() == b"secret"
 
 
+@network_retry
 async def test_passthrough_https_explicit():
     """An https:// URL in the passthrough list reaches the real server with TLS."""
     async with ClientSession() as session:
@@ -860,6 +865,7 @@ async def test_passthrough_https_explicit():
             assert real.status == 201
 
 
+@network_retry
 async def test_passthrough_unmatched_https_no_patterns():
     """With passthrough_unmatched=True and no patterns, HTTPS goes via real DNS directly."""
     async with ClientSession() as session:
@@ -873,6 +879,7 @@ async def test_passthrough_unmatched_https_no_patterns():
             assert real.status == 200
 
 
+@network_retry
 async def test_passthrough_unmatched_https_with_patterns():
     """With patterns active (all DNS redirected), HTTPS passthrough still works.
 
