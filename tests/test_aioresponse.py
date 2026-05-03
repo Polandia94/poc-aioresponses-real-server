@@ -25,6 +25,7 @@ except ImportError:
     )
 
 from aiointercept import CallbackResult, aiointercept
+from tests.conftest import network_retry
 
 from .base import AsyncTestCase
 
@@ -352,6 +353,7 @@ class AIOResponsesTestCase(AsyncTestCase):
                 await coro
             assert str(exception_info.exception) == "Session is closed"
 
+    @network_retry
     async def test_address_as_instance_of_url_combined_with_pass_through(self):
         external_api = "http://httpbin.org/status/201"
 
@@ -369,6 +371,7 @@ class AIOResponsesTestCase(AsyncTestCase):
             self.assertEqual(api.status, 200)
             self.assertEqual(ext.status, 201)
 
+    @network_retry
     async def test_pass_through_with_origin_params(self):
         external_api = "http://httpbin.org/get"
 
@@ -674,6 +677,7 @@ class AIOResponseRedirectTest(AsyncTestCase):
         self.assertEqual(len(response.history), 1)
         self.assertEqual(str(response.history[0].url), url)
 
+    @network_retry
     async def test_pass_through_unmatched_requests(self):
         matched_url = "https://matched_example.org"
         unmatched_url = "https://httpbin.org/get"
