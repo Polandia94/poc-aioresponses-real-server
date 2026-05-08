@@ -23,9 +23,9 @@ from aiointercept import aiointercept
 
 async def test_example():
     async with aiohttp.ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/api", payload={"hello": "world"})
-            resp = await session.get("http://example.com/api")
+        async with aiointercept(mock_external_urls=False) as m:
+            m.get(f"{m.server_url}/api", payload={"hello": "world"})
+            resp = await session.get(f"{m.server_url}/api")
             assert resp.status == 200
             assert await resp.json() == {"hello": "world"}
 ```
@@ -37,14 +37,14 @@ The `aiointercept` instance is passed as the last positional argument (or the kw
 ```python
 from aiointercept import aiointercept
 
-@aiointercept(mock_external_urls=True)
+@aiointercept(mock_external_urls=False)
 async def test_example(m):
-    m.get("http://example.com/api", payload={"hello": "world"})
+    m.get(f"{m.server_url}/api", payload={"hello": "world"})
     ...
 
-@aiointercept(mock_external_urls=True, param="mock")
+@aiointercept(mock_external_urls=False, param="mock")
 async def test_named(mock):
-    mock.get("http://example.com/api", status=204)
+    mock.get(f"{mock.server_url}/api", status=204)
     ...
 ```
 
@@ -58,11 +58,11 @@ from aiointercept import aiointercept
 
 @pytest_asyncio.fixture
 async def mock_http():
-    async with aiointercept(mock_external_urls=True) as m:
+    async with aiointercept() as m:
         yield m
 
 async def test_something(mock_http):
-    mock_http.get("http://example.com/api", payload={"ok": True})
+    mock_http.get(f"{mock_http.server_url}/api", payload={"ok": True})
     ...
 ```
 
@@ -77,7 +77,7 @@ async def test_something(mock_http):
 
 ## Interception modes
 
-### `mock_external_urls=False` (recommended)
+### `mock_external_urls=False` (default)
 
 The server starts on `localhost` but DNS is not patched. Point your client at `m.server_url` directly:
 
