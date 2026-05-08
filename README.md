@@ -237,26 +237,11 @@ async with aiointercept(True, passthrough_unmatched=True) as m:
 
 ## Migrating from aioresponses
 
-`aiointercept` is a near drop-in replacement. Key differences:
-
-| Feature | aioresponses | aiointercept |
-|---|---|---|
-| Context manager | sync (`with`) | async (`async with`) |
-| Transport | pure mock | real `aiohttp.web` server |
-| pytest fixture | sync | `async` (`pytest_asyncio`) |
-| `mock_external_urls` | always mock | **required** constructor arg |
-| `exception=` | raises given exception | `ClientConnectionError` only |
-| `CallbackResult(response_class=)` | used | silently ignored, not needed |
-| request `**kwargs` keys | full request kwargs | `headers`, `query`, `json` only |
-| `call_count` / `call_args_list` | available | not implemented |
-| Bare-IP DNS interception | works | not supported |
-| `timeout=` passthrough | supported | not supported |
-
-`assert_called_with` / `assert_called_once_with` silently ignore client-only kwargs like `ssl=` and `timeout=` (they are not observable on the wire) and emit a `DeprecationWarning`. Remove those arguments when migrating.
+See [MIGRATING.md](https://github.com/Polandia94/aioresponses-real-server/blob/main/MIGRATING.md) for a step-by-step guide covering every breaking change: context manager, fixture, URL registration, `exception=`, callbacks, and assertion helpers.
 
 ### Compatibility policy
 
-The goal is to keep `aiointercept` as a near drop-in replacement for `aioresponses`. If you find an incompatibility not listed in the table above, please open an issue — it will be documented, and if there is a reasonable way to resolve it, it will be attempted.
+The goal is to keep `aiointercept` as a near drop-in replacement for `aioresponses`. If you find an incompatibility not covered in the migration guide, please open an issue — it will be documented, and if there is a reasonable way to resolve it, it will be attempted.
 
 ### Roadmap
 
