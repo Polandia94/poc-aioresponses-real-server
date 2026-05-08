@@ -30,7 +30,7 @@ async def test_mock_external_urls_true_basic():
 
 async def test_mock_external_urls_false_uses_server_host_port():
     """Without DNS patching we connect directly to server_host:server_port."""
-    async with aiointercept(mock_external_urls=False) as m:
+    async with aiointercept() as m:
         m.add(f"{m.server_url}/api", method="GET", status=201, body=b"direct")
         url = f"http://{m.server_host}:{m.server_port}/api"
         async with ClientSession() as session:

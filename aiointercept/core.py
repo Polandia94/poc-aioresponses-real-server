@@ -178,7 +178,7 @@ class aiointercept:
 
     def __init__(
         self,
-        mock_external_urls: bool,
+        mock_external_urls: bool = False,
         passthrough: Sequence[str] | None = None,
         passthrough_unmatched: bool = False,
         param: str | None = None,
