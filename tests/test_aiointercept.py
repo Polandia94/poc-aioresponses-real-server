@@ -1151,3 +1151,72 @@ async def test_exception_instance_logs_warning(caplog):
             assert caplog.records
             with pytest.raises(ClientConnectionError):
                 await session.get("http://example.com/exc-inst")
+
+
+# ---------------------------------------------------------------------------
+# exception= registers host so DNS redirects correctly
+# ---------------------------------------------------------------------------
+
+
+async def test_exception_only_registration_raises_connection_error():
+    """When exception= is the only registration for a host, requests raise ClientConnectionError."""
+    async with ClientSession() as session:
+        async with aiointercept(
+            mock_external_urls=True, passthrough_unmatched=True
+        ) as m:
+            m.post("http://example.com/path", exception=True)
+            with pytest.raises(ClientConnectionError):
+                await session.post("http://example.com/path")
+
+
+# ---------------------------------------------------------------------------
+# clear() resets _https_hosts
+# ---------------------------------------------------------------------------
+
+
+async def test_clear_resets_https_hosts():
+    """After clear(), a host previously seen as HTTPS is no longer treated as HTTPS."""
+    async with aiointercept(mock_external_urls=False) as m:
+        m.get("https://secure.test/data", status=200, body=b"secret")
+        async with ClientSession() as session:
+            await session.get(
+                f"{m.server_url}/data",
+                headers={"Host": "secure.test", "X-Aiointercept-Orig-Scheme": "https"},
+            )
+
+        assert "secure.test" in m._https_hosts
+
+        m.clear()
+        assert "secure.test" not in m._https_hosts
+
+        m.get("http://secure.test/data", status=404, body=b"gone")
+        async with ClientSession() as session:
+            # Without the fix this resolves to https://secure.test/data (no handler) → 502.
+            # With the fix it correctly resolves to http://secure.test/data → 404.
+            resp = await session.get(
+                f"{m.server_url}/data",
+                headers={"Host": "secure.test"},
+            )
+            assert resp.status == 404
+
+
+# ---------------------------------------------------------------------------
+# passthrough_unmatched works with URL handlers (no patterns)
+# ---------------------------------------------------------------------------
+
+
+@network_retry
+async def test_passthrough_unmatched_url_handler_unknown_path_proxied():
+    """With URL-based (non-pattern) handlers and passthrough_unmatched=True, an
+    unregistered path on a registered host is proxied to the real server, not
+    closed with ClientConnectionError."""
+    async with ClientSession() as session:
+        async with aiointercept(
+            mock_external_urls=True, passthrough_unmatched=True
+        ) as m:
+            m.get("http://httpbin.org/status/200", status=418)
+            mocked = await session.get("http://httpbin.org/status/200")
+            assert mocked.status == 418
+            # Same host, different path — should proxy to real httpbin, not close.
+            real = await session.get("http://httpbin.org/status/201")
+            assert real.status == 201

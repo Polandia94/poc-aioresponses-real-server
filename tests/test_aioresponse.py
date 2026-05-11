@@ -127,9 +127,6 @@ class AIOResponsesTestCase(AsyncTestCase):
             (b"Connection", b"keep-alive"),
             (hdrs.CONTENT_TYPE.encode(), b"text/html"),
         )
-        print("Response raw headers:")
-        print(response.raw_headers)
-        print(expected_raw_headers)
         self.assertTrue(
             all(header in response.raw_headers for header in expected_raw_headers)
         )
