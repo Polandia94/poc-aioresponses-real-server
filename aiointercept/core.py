@@ -28,7 +28,7 @@ class AiointerceptRequestKwargs(TypedDict):
 
 
 class AiointerceptRequest(web.Request):
-    _captured_body: bytes
+    captured_body: bytes
     kwargs: AiointerceptRequestKwargs
 
     @classmethod
@@ -39,7 +39,7 @@ class AiointerceptRequest(web.Request):
         kwargs: "AiointerceptRequestKwargs",
     ) -> "AiointerceptRequest":
         request.__class__ = cls
-        request._captured_body = captured_body  # type: ignore[attr-defined]
+        request.captured_body = captured_body  # type: ignore[attr-defined]
         request.kwargs = kwargs  # type: ignore[attr-defined]
         return cast("AiointerceptRequest", request)
 
@@ -168,7 +168,12 @@ class CallbackResult:
         self.reason = reason
 
 
-handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]] | type[Exception]
+class _CloseConnection:
+    """Sentinel: handler should close the transport, surfacing ClientConnectionError on the client."""
+
+
+_CLOSE_CONNECTION = _CloseConnection()
+handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]] | _CloseConnection
 
 
 class aiointercept:
@@ -189,6 +194,11 @@ class aiointercept:
                 "Passing extra parameters to aiointercept via kwargs is deprecated and will be removed in a future release.",
                 DeprecationWarning,
                 stacklevel=2,
+            )
+
+        if passthrough_unmatched and not mock_external_urls:
+            raise ValueError(
+                "passthrough_unmatched=True requires mock_external_urls=True"
             )
 
         self._passthrough_urls = passthrough or []
@@ -420,7 +430,7 @@ class aiointercept:
                         for k, v in request.headers.items()
                         if k.lower() not in _PROXY_REQ_DROP
                     },
-                    data=getattr(request, "_captured_body", None) or None,
+                    data=getattr(request, "captured_body", None) or None,
                     allow_redirects=True,
                     ssl=True,
                 ) as real_resp:
@@ -437,16 +447,23 @@ class aiointercept:
             # this should raise ClientConnectionError on the other side
             if request.transport:
                 request.transport.close()
+            # Fallback in case transport.close() didn't take effect — the client
+            # should normally see ClientConnectionError before reading this body.
             return web.Response(
                 status=502, text="No handler registered for this request."
             )
-        if handler is Exception:
+        if handler is _CLOSE_CONNECTION:
             if request.transport:
                 request.transport.close()
+            # Fallback in case transport.close() didn't take effect — the client
+            # should normally see ClientConnectionError before reading this body.
             return web.Response(
                 status=502, text="Handler registered to raise ClientConnectionError."
             )
-        return await handler(request)  # type: ignore[misc]
+        callable_handler = cast(
+            Callable[[web.Request], Awaitable[web.StreamResponse]], handler
+        )
+        return await callable_handler(request)
 
     def add(
         self,
@@ -549,7 +566,7 @@ class aiointercept:
                 content_type=_content_type,
             )
 
-        handler_or_exc = handler if not exception else Exception
+        handler_or_exc: handler_type = handler if not exception else _CLOSE_CONNECTION
         if repeat is True:
             if isinstance(url, Pattern):
                 self.patterns_handler[url, method] = handler_or_exc
@@ -698,7 +715,7 @@ class aiointercept:
         if key not in self.requests:
             raise AssertionError(f"No calls to {method.upper()} {url}")
         request: AiointerceptRequest = self.requests[key][-1]
-        actual_body = request._captured_body
+        actual_body = request.captured_body
         if json is not None:
             # aiohttp sends json= as JSON-encoded bytes with application/json
             actual_body_str = actual_body.decode(errors="replace")

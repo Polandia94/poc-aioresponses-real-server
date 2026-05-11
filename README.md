@@ -315,7 +315,7 @@ from yarl import URL
 key = ("POST", URL("https://api.example.com/orders"))
 req = m.requests[key][-1]   # most recent request
 
-req._captured_body           # raw bytes body
+req.captured_body            # raw bytes body
 req.kwargs["json"]           # parsed JSON body (or None)
 req.kwargs["query"]          # dict[str, list[str]] — preserves duplicate keys
 req.kwargs["headers"]        # raw request headers (multidict)
