@@ -21,27 +21,27 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence, Type, TypedDict,
 from .compat import merge_params, normalize_url
 
 
-class AiointerceptRequstKwargs(TypedDict):
+class AiointerceptRequestKwargs(TypedDict):
     headers: Mapping[str, str]
     query: Mapping[str, Sequence[str]]
     json: Any | None
 
 
-class AiointercepRequest(web.Request):
+class AiointerceptRequest(web.Request):
     _captured_body: bytes
-    kwargs: AiointerceptRequstKwargs
+    kwargs: AiointerceptRequestKwargs
 
     @classmethod
     def upgrade(
         cls,
         request: web.Request,
         captured_body: bytes,
-        kwargs: "AiointerceptRequstKwargs",
-    ) -> "AiointercepRequest":
+        kwargs: "AiointerceptRequestKwargs",
+    ) -> "AiointerceptRequest":
         request.__class__ = cls
         request._captured_body = captured_body  # type: ignore[attr-defined]
         request.kwargs = kwargs  # type: ignore[attr-defined]
-        return cast("AiointercepRequest", request)
+        return cast("AiointerceptRequest", request)
 
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ class CallbackResult:
         self.reason = reason
 
 
-handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]]
+handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]] | type[Exception]
 
 
 class aiointercept:
@@ -203,7 +203,7 @@ class aiointercept:
         self.param = param
         self.passthrough_unmatched = passthrough_unmatched
 
-        self._host_list: list[str] = []
+        self._host_list: set[str] = set()
         self._https_hosts: set[str] = set()
         self._patterns_list: list[Pattern[str]] = []
 
@@ -215,7 +215,7 @@ class aiointercept:
         ] = {}
 
         # recorded requests: {(METHOD, URL): [web.Request, ...]}
-        self.requests: dict[tuple[str, URL], list[AiointercepRequest]] = {}
+        self.requests: dict[tuple[str, URL], list[AiointerceptRequest]] = {}
 
         self.server: TestServer | None = None
         self._bypass_session: aiohttp.ClientSession | None = None
@@ -359,14 +359,14 @@ class aiointercept:
         except Exception:
             json = None
         # this kwargs will be removed, should be deprecated in the future
-        request_kwargs: AiointerceptRequstKwargs = {
+        request_kwargs: AiointerceptRequestKwargs = {
             "headers": request.headers,
             # Use getall so duplicate keys (?a=1&a=2) aren't collapsed to one value.
             "query": {k: request.query.getall(k) for k in dict.fromkeys(request.query)},
             "json": json,
         }
 
-        aiointercept_request = AiointercepRequest.upgrade(
+        aiointercept_request = AiointerceptRequest.upgrade(
             request, captured_body, request_kwargs
         )
         # Read body eagerly before the handler runs, because aiohttp sets
@@ -405,11 +405,7 @@ class aiointercept:
                     break
 
         if handler is None:
-            if (
-                self._mock_external_urls
-                and self._patterns_list
-                and self.passthrough_unmatched
-            ):
+            if self._mock_external_urls and self.passthrough_unmatched:
                 scheme = request.headers.get("X-Aiointercept-Orig-Scheme") or (
                     "https" if request.secure else "http"
                 )
@@ -444,7 +440,13 @@ class aiointercept:
             return web.Response(
                 status=502, text="No handler registered for this request."
             )
-        return await handler(request)
+        if handler is Exception:
+            if request.transport:
+                request.transport.close()
+            return web.Response(
+                status=502, text="Handler registered to raise ClientConnectionError."
+            )
+        return await handler(request)  # type: ignore[misc]
 
     def add(
         self,
@@ -489,9 +491,6 @@ class aiointercept:
                 logger.warning(
                     "aiointercept only raise ClientConnectionError, pass exception=True instead of an specific exception"
                 )
-            # if there is an excpetion, dont add handler, will return a clientDisconnectionError
-            # add some deprecation or similar
-            return
         method = method.upper()
         if isinstance(url, str):
             url = URL(url)
@@ -507,7 +506,7 @@ class aiointercept:
             assert host, f"Cannot extract host from {url!r}"
 
             # Map this host → our test server
-            self._host_list.append(host)
+            self._host_list.add(host)
 
         if json is not None:
             body = json_module.dumps(json).encode()
@@ -524,10 +523,10 @@ class aiointercept:
             if callable(callback):
                 if inspect.iscoroutinefunction(callback):
                     result = await callback(
-                        url, **cast(AiointercepRequest, request).kwargs
+                        url, **cast(AiointerceptRequest, request).kwargs
                     )
                 else:
-                    result = callback(url, **cast(AiointercepRequest, request).kwargs)
+                    result = callback(url, **cast(AiointerceptRequest, request).kwargs)
                 _status = result.status
                 _body = result.body
                 _headers = result.headers or {}
@@ -550,18 +549,19 @@ class aiointercept:
                 content_type=_content_type,
             )
 
+        handler_or_exc = handler if not exception else Exception
         if repeat is True:
             if isinstance(url, Pattern):
-                self.patterns_handler[url, method] = handler
+                self.patterns_handler[url, method] = handler_or_exc
                 return
             handler_url = str(normalize_url(url))
-            self.handlers[handler_url, method] = handler
+            self.handlers[handler_url, method] = handler_or_exc
         else:
             if repeat is False or repeat == 0:
                 repeat = 1
             if repeat < 1:
                 raise ValueError("repeat must be at least 1")
-            handlers: list[handler_type] = [handler] * repeat
+            handlers: list[handler_type] = [handler_or_exc] * repeat
             if isinstance(url, Pattern):
                 if (url, method) in self.patterns_handler:
                     list_pattern_handler = self.patterns_handler[(url, method)]
@@ -589,6 +589,9 @@ class aiointercept:
                         f"Existing handler for {handler_url} {method} has repeat=True, cannot add more handlers to it."
                     )
             else:
+                print(
+                    f"Registering handler for {handler_url} {method} with repeat={repeat}, handlers={handlers}"
+                )
                 self.handlers[handler_url, method] = handlers
 
     def get(self, url: "URL | str | Pattern[str]", **kwargs: Any) -> None:
@@ -626,6 +629,7 @@ class aiointercept:
         self.patterns_handler.clear()
         self._host_list.clear()
         self._patterns_list.clear()
+        self._https_hosts.clear()
 
     def assert_called(self) -> None:
         """Assert that at least one request was made."""
@@ -696,7 +700,7 @@ class aiointercept:
         key = (method.upper(), url)
         if key not in self.requests:
             raise AssertionError(f"No calls to {method.upper()} {url}")
-        request = cast(AiointercepRequest, self.requests[key][-1])
+        request: AiointerceptRequest = self.requests[key][-1]
         actual_body = request._captured_body
         if json is not None:
             # aiohttp sends json= as JSON-encoded bytes with application/json
