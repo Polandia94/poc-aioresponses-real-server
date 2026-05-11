@@ -123,7 +123,7 @@ Use `m.server_url` as a `base_url` to keep your code clean:
 
 ```python
 async with aiointercept() as m:
-    m.get("/api/users", payload=[{"id": 1}])
+    m.get(f"{m.server_url}/api/users", payload=[{"id": 1}])
 
     async with aiohttp.ClientSession(base_url=m.server_url) as session:
         resp = await session.get("/api/users")
@@ -345,7 +345,7 @@ Base URL of the local test server, e.g. `"http://127.0.0.1:54321"`. Available af
 ### `m.requests`
 
 ```python
-m.requests: dict[tuple[str, URL], list[AiointercepRequest]]
+m.requests: dict[tuple[str, URL], list[AiointerceptRequest]]
 ```
 
 Maps `(METHOD, URL)` to a list of all intercepted requests in the order they were received.
