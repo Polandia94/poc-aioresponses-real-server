@@ -589,9 +589,6 @@ class aiointercept:
                         f"Existing handler for {handler_url} {method} has repeat=True, cannot add more handlers to it."
                     )
             else:
-                print(
-                    f"Registering handler for {handler_url} {method} with repeat={repeat}, handlers={handlers}"
-                )
                 self.handlers[handler_url, method] = handlers
 
     def get(self, url: "URL | str | Pattern[str]", **kwargs: Any) -> None:
