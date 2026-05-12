@@ -7,9 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AiointerceptRequest` is now exported from the top-level `aiointercept` package so users can type-annotate recorded requests without reaching into `aiointercept.core`.
+
+### Fixed
+
+- `clear()` now also resets the internal `_https_hosts` set, so a host previously seen with HTTPS traffic is no longer incorrectly treated as HTTPS after `clear()` is called.
+- `exception=` (any truthy value) now correctly registers the target host in `_host_list` before returning, ensuring DNS is redirected to the mock server by design rather than by the fallback path.
+- `passthrough_unmatched=True` now proxies unmatched paths for URL-registered hosts (not just pattern-registered ones). Previously, a registered host with an unknown path would close the connection even when `passthrough_unmatched=True`.
+- `_host_list` is now a `set` instead of a `list`, preventing duplicate host entries when the same URL is registered multiple times.
+- Passing `passthrough_unmatched=True` without `mock_external_urls=True` now raises `ValueError` at construction time instead of being silently ignored.
+
 ### Changed
 
 - `mock_external_urls` now defaults to `False`, making it an optional parameter. Callers that omit it get the recommended no-DNS-patching mode.
+- Renamed `AiointerceptRequest._captured_body` → `AiointerceptRequest.captured_body` (now public). 
+
+### Removed
+
+- Stale `plan.md` planning artifact removed from the repository root.
+
+### Internal
+
+- Renamed `AiointercepRequest` → `AiointerceptRequest` (added missing `t`).
+- Renamed `AiointerceptRequstKwargs` → `AiointerceptRequestKwargs` (fixed `Requst` → `Request`).
+- Replaced the `Exception`-class-as-sentinel pattern with a named `_CloseConnection` sentinel for the "close transport" handler marker.
+- Added comments on the 502 fallback responses in `_dispatch` clarifying they only surface if `transport.close()` does not take effect.
 
 ## [0.1.1] - 2026-05-04
 
