@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-05-12
 
 ### Added
 
@@ -23,10 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `mock_external_urls` now defaults to `False`, making it an optional parameter. Callers that omit it get the recommended no-DNS-patching mode.
 - Renamed `AiointerceptRequest._captured_body` → `AiointerceptRequest.captured_body` (now public). 
-
-### Removed
-
-- Stale `plan.md` planning artifact removed from the repository root.
 
 ### Internal
 
