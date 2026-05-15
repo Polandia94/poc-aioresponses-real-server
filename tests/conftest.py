@@ -23,5 +23,6 @@ def network_retry(fn: F) -> F:
             except Exception:
                 if delay == _RETRY_DELAYS[-1]:
                     raise
+        raise RuntimeError("retry logic failed unexpectedly")  # This should never happen.
 
     return wrapper  # type: ignore[return-value]
