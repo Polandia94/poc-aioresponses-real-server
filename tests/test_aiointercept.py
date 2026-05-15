@@ -1220,3 +1220,54 @@ async def test_passthrough_unmatched_url_handler_unknown_path_proxied():
             # Same host, different path — should proxy to real httpbin, not close.
             real = await session.get("http://httpbin.org/status/201")
             assert real.status == 201
+
+
+# ---------------------------------------------------------------------------
+# Caller-loop-blocked patterns (TestClient deadlock regression)
+# ---------------------------------------------------------------------------
+
+
+async def test_caller_loop_blocked_does_not_deadlock():
+    """Regression: when the caller's event loop is blocked synchronously during
+    a request — the pattern Starlette/FastAPI TestClient produces — the intercept
+    server must still accept and serve the connection. The server runs on its
+    own thread + loop, so this works by construction."""
+    import threading
+    import concurrent.futures
+
+    async with aiointercept(mock_external_urls=True) as m:
+        m.get("http://blocked.test/api", status=200, body=b"served")
+
+        done = threading.Event()
+        result: dict[str, object] = {}
+
+        def _do_blocking_request() -> None:
+            # A fresh event loop in a worker thread, used synchronously
+            # (run_until_complete) — mirrors Starlette TestClient, which runs
+            # the ASGI app in a worker thread with its own loop and blocks
+            # the caller via a sync method.
+            worker_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(worker_loop)
+
+                async def _request() -> None:
+                    async with ClientSession() as session:
+                        resp = await session.get("http://blocked.test/api")
+                        result["status"] = resp.status
+                        result["body"] = await resp.read()
+
+                worker_loop.run_until_complete(_request())
+            finally:
+                worker_loop.close()
+                done.set()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_do_blocking_request)
+            # Do not yield control back to the caller's loop until the worker
+            # finishes — this is what TestClient effectively does by blocking
+            # the caller via a sync method. If the intercept server were bound
+            # to the caller's loop, this would deadlock.
+            done.wait(timeout=10)
+            fut.result(timeout=1)
+
+        assert result == {"status": 200, "body": b"served"}
