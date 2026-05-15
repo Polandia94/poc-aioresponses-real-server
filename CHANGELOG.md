@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The intercept `TestServer` no longer runs on the caller's event loop. It now starts on a dedicated daemon thread with its own loop, so callers that block their own loop between `__aenter__` and `__aexit__` (e.g. Starlette/FastAPI `TestClient`, which holds the loop during a synchronous `client.get(...)` call) can no longer deadlock the mock server. Plain mocks (`m.get(url, status=...)`) under `TestClient` now work by construction.
+
+### Changed
+
+- Async user callbacks registered via `callback=` are now executed on the caller's event loop (the loop active when `__aenter__` was called), even though the server runs on its own loop. This preserves prior semantics: `asyncio.Event`, `asyncio.Queue`, `asyncio.Lock`, and other loop-bound primitives shared between the test and the callback continue to work. Sync callbacks are unaffected and continue to run on the server loop.
+
+### Internal
+
+- Expanded the `ruff` lint rule set (`UP`, `B`, `C4`, `SIM`, `N`, `RUF`, `PT`, `TCH`, `ASYNC`, `PERF`, `RET`, `ARG`) with `line-length = 120` and `target-version = "py310"`, and reformatted `aiointercept/core.py` accordingly: PEP 585 `type[X]` over `typing.Type[X]`, string-form `cast("X", ...)` annotations, `contextlib.suppress` instead of `try/except/pass`, and consolidated imports. No behaviour change.
+
+### Known limitations
+
+- The narrow combination of an **async callback** *and* a caller loop that is fully blocked (e.g. an async `callback=` inside a Starlette `TestClient` request) still deadlocks: the callback is scheduled onto the caller's loop, which cannot run it while it is blocked. Plain mocks under `TestClient` are unaffected.
+
 ## [0.1.2] - 2026-05-12
 
 ### Added

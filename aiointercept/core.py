@@ -1,23 +1,27 @@
+import asyncio
+import contextlib
+import gc
+import inspect
+import json as json_module
+import logging
 import socket
 import threading
+import typing
+import warnings
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import wraps
 from re import Pattern
-import typing
-import json as json_module
-import inspect
-import warnings
-import gc
+from typing import Any, TypedDict, cast
 from urllib.parse import parse_qs, urlencode
-import logging
 
 import aiohttp
-from aiohttp import ClientRequest, ClientResponse, web, hdrs
+from aiohttp import ClientRequest, ClientResponse, hdrs, web
 from aiohttp.abc import AbstractResolver, ResolveResult
 from aiohttp.connector import SSLContext, TCPConnector
-from aiohttp.resolver import ThreadedResolver, AsyncResolver
+from aiohttp.resolver import AsyncResolver, ThreadedResolver
 from aiohttp.test_utils import TestServer
 from yarl import URL
-from typing import Any, Awaitable, Callable, Mapping, Sequence, Type, TypedDict, cast
+
 from .compat import merge_params, normalize_url
 
 
@@ -59,9 +63,7 @@ _real_ssl_context: Any = None
 _active_instances: "list[aiointercept]" = []
 
 
-def _make_resolve_result(
-    host: str, inst: "aiointercept", family: "socket.AddressFamily"
-) -> "ResolveResult":
+def _make_resolve_result(host: str, inst: "aiointercept", family: "socket.AddressFamily") -> "ResolveResult":
     return ResolveResult(
         hostname=host,
         host=inst.server_host,
@@ -73,11 +75,7 @@ def _make_resolve_result(
 
 
 def _pick_real_resolver(resolver_self: "AbstractResolver") -> Any:
-    return (
-        _real_threaded_resolve
-        if isinstance(resolver_self, ThreadedResolver)
-        else _real_async_resolve
-    )
+    return _real_threaded_resolve if isinstance(resolver_self, ThreadedResolver) else _real_async_resolve
 
 
 async def _shared_resolve(
@@ -95,9 +93,7 @@ async def _shared_resolve(
 
     for inst in instances:
         if host in inst._passthrough_hosts or inst.passthrough_unmatched:
-            return await _pick_real_resolver(resolver_self)(
-                resolver_self, host, port, family
-            )
+            return await _pick_real_resolver(resolver_self)(resolver_self, host, port, family)
 
     # No instance claims this host and none allow passthrough — redirect to
     # the innermost instance's server so the client gets a clear connection error.
@@ -107,9 +103,7 @@ async def _shared_resolve(
     return await _pick_real_resolver(resolver_self)(resolver_self, host, port, family)
 
 
-def _shared_ssl_context(
-    connector_self: "TCPConnector", req: "ClientRequest"
-) -> "SSLContext | None":
+def _shared_ssl_context(connector_self: "TCPConnector", req: "ClientRequest") -> "SSLContext | None":
     with _patch_lock:
         instances = list(reversed(_active_instances))
 
@@ -123,9 +117,7 @@ def _shared_ssl_context(
             return None
 
     for inst in instances:
-        if inst._patterns_list and (
-            inst.passthrough_unmatched or host in inst._passthrough_hosts
-        ):
+        if inst._patterns_list and (inst.passthrough_unmatched or host in inst._passthrough_hosts):
             if req.url.scheme == "https":
                 req.headers["X-Aiointercept-Orig-Scheme"] = "https"
             return None
@@ -155,7 +147,7 @@ class CallbackResult:
         content_type: str = "application/json",
         payload: Any = None,
         headers: Mapping[str, str] | None = None,
-        response_class: Type[ClientResponse] | None = None,
+        response_class: type[ClientResponse] | None = None,
         reason: str | None = None,
     ):
         self.method = method
@@ -176,7 +168,7 @@ _CLOSE_CONNECTION = _CloseConnection()
 handler_type = Callable[[web.Request], Awaitable[web.StreamResponse]] | _CloseConnection
 
 
-class aiointercept:
+class aiointercept:  # noqa: N801
     """
     Mock aiohttp requests by redirecting DNS to a local aiohttp.web test server.
     """
@@ -191,15 +183,14 @@ class aiointercept:
     ) -> None:
         if kwargs:
             warnings.warn(
-                "Passing extra parameters to aiointercept via kwargs is deprecated and will be removed in a future release.",
+                "Passing extra parameters to aiointercept via kwargs is deprecated "
+                "and will be removed in a future release.",
                 DeprecationWarning,
                 stacklevel=2,
             )
 
         if passthrough_unmatched and not mock_external_urls:
-            raise ValueError(
-                "passthrough_unmatched=True requires mock_external_urls=True"
-            )
+            raise ValueError("passthrough_unmatched=True requires mock_external_urls=True")
 
         self._passthrough_urls = passthrough or []
         self._passthrough_hosts: list[str] = []
@@ -220,97 +211,174 @@ class aiointercept:
         # handler are (path, method) → handler or list of handlers (if repeat != True)
         self.handlers: dict[tuple[str, str], handler_type | list[handler_type]] = {}
         # patterns_handler are (pattern, method) → handler or list of handlers (if repeat != True)
-        self.patterns_handler: dict[
-            tuple[Pattern[str], str], handler_type | list[handler_type]
-        ] = {}
+        self.patterns_handler: dict[tuple[Pattern[str], str], handler_type | list[handler_type]] = {}
 
         # recorded requests: {(METHOD, URL): [web.Request, ...]}
         self.requests: dict[tuple[str, URL], list[AiointerceptRequest]] = {}
 
         self.server: TestServer | None = None
         self._bypass_session: aiohttp.ClientSession | None = None
+        # The intercept server runs on its own daemon thread + event loop so
+        # that callers whose loop gets blocked (e.g. Starlette TestClient
+        # holding the loop during a sync request) cannot deadlock the server.
+        self._server_thread: threading.Thread | None = None
+        self._server_loop: asyncio.AbstractEventLoop | None = None
+        # The loop the caller entered the context manager on. Async user
+        # callbacks are scheduled back onto this loop so they observe the
+        # same loop-bound primitives (asyncio.Event, asyncio.Queue, ...) as
+        # the rest of the test.
+        self._caller_loop: asyncio.AbstractEventLoop | None = None
 
     async def __aenter__(self) -> "aiointercept":
-        app = web.Application()
-        # we add every route to the app.
-        app.router.add_route("*", "/{tail:.*}", self._dispatch)
-        self.server = TestServer(app)
-        await self.server.start_server()
+        self._caller_loop = asyncio.get_running_loop()
+        await self._start_server_thread()
+        assert self._server_loop is not None
+        assert self.server is not None
 
-        assert isinstance(self.server.host, str) and isinstance(self.server.port, int)  # pyright: ignore[reportUnknownMemberType]
+        assert isinstance(self.server.host, str)
+        assert isinstance(self.server.port, int)
         self.server_host = self.server.host
         self.server_port = self.server.port
         self.server_url = f"http://{self.server_host}:{self.server.port}"
 
-        if self._mock_external_urls:
-            global \
-                _patch_refcount, \
-                _real_threaded_resolve, \
-                _real_async_resolve, \
-                _real_ssl_context
-            with _patch_lock:
-                _active_instances.append(self)
-                if _patch_refcount == 0:
-                    _real_threaded_resolve = ThreadedResolver.resolve
-                    _real_async_resolve = AsyncResolver.resolve
-                    _real_ssl_context = TCPConnector._get_ssl_context  # pyright: ignore[reportPrivateUsage]
-                    ThreadedResolver.resolve = _shared_resolve  # type: ignore
-                    AsyncResolver.resolve = _shared_resolve  # type: ignore
-                    TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
-                _patch_refcount += 1
-            self._clear_all_connector_caches()
-            self._bypass_session = self._make_bypass_session()
+        try:
+            if self._mock_external_urls:
+                global _patch_refcount, _real_threaded_resolve, _real_async_resolve, _real_ssl_context
+                with _patch_lock:
+                    _active_instances.append(self)
+                    if _patch_refcount == 0:
+                        _real_threaded_resolve = ThreadedResolver.resolve
+                        _real_async_resolve = AsyncResolver.resolve
+                        _real_ssl_context = TCPConnector._get_ssl_context  # pyright: ignore[reportPrivateUsage]
+                        ThreadedResolver.resolve = _shared_resolve  # type: ignore
+                        AsyncResolver.resolve = _shared_resolve  # type: ignore
+                        TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
+                    _patch_refcount += 1
+                self._clear_all_connector_caches()
+
+                # ClientSession binds to the running loop at construction time,
+                # so build it on the server loop (where _dispatch will use it).
+                async def _create_bypass() -> None:
+                    self._bypass_session = self._make_bypass_session()
+
+                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_create_bypass(), self._server_loop))
+        except BaseException:
+            await self._stop_server_thread()
+            raise
 
         return self
 
     async def __aexit__(
         self,
-        exc_type: Type[BaseException] | None,
+        exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        if self._mock_external_urls:
-            global \
-                _patch_refcount, \
-                _real_threaded_resolve, \
-                _real_async_resolve, \
-                _real_ssl_context
-            with _patch_lock:
-                _active_instances.remove(self)
-                _patch_refcount -= 1
-                if _patch_refcount == 0:
-                    ThreadedResolver.resolve = _real_threaded_resolve  # type: ignore[method-assign]
-                    AsyncResolver.resolve = _real_async_resolve  # type: ignore[method-assign]
-                    TCPConnector._get_ssl_context = _real_ssl_context  # type: ignore[method-assign,reportPrivateUsage]
-                    _real_threaded_resolve = None
-                    _real_async_resolve = None
-                    _real_ssl_context = None
-        if self._bypass_session:
-            await self._bypass_session.close()
-            self._bypass_session = None
-        if self.server:
-            await self.server.close()
-            self.server = None
-        self.handlers.clear()
-        self.patterns_handler.clear()
-        self._host_list.clear()
-        self._https_hosts.clear()
-        self._patterns_list.clear()
+        try:
+            if self._mock_external_urls:
+                global _patch_refcount, _real_threaded_resolve, _real_async_resolve, _real_ssl_context
+                with _patch_lock:
+                    _active_instances.remove(self)
+                    _patch_refcount -= 1
+                    if _patch_refcount == 0:
+                        ThreadedResolver.resolve = _real_threaded_resolve  # type: ignore[method-assign]
+                        AsyncResolver.resolve = _real_async_resolve  # type: ignore[method-assign]
+                        TCPConnector._get_ssl_context = _real_ssl_context  # type: ignore[method-assign,reportPrivateUsage]
+                        _real_threaded_resolve = None
+                        _real_async_resolve = None
+                        _real_ssl_context = None
+        finally:
+            await self._stop_server_thread()
+            self._caller_loop = None
+            self.handlers.clear()
+            self.patterns_handler.clear()
+            self._host_list.clear()
+            self._https_hosts.clear()
+            self._patterns_list.clear()
+
+    async def _start_server_thread(self) -> None:
+        ready = threading.Event()
+        startup_error: list[BaseException] = []
+
+        def _run_server_thread() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._server_loop = loop
+
+            async def _start_server() -> None:
+                app = web.Application()
+                app.router.add_route("*", "/{tail:.*}", self._dispatch)
+                self.server = TestServer(app)
+                await self.server.start_server()
+
+            try:
+                loop.run_until_complete(_start_server())
+            except BaseException as e:
+                startup_error.append(e)
+                ready.set()
+                loop.close()
+                self._server_loop = None
+                return
+
+            ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                # Drain anything still scheduled before closing the loop.
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                finally:
+                    loop.close()
+
+        self._server_thread = threading.Thread(target=_run_server_thread, name="aiointercept-server", daemon=True)
+        self._server_thread.start()
+        # ready.wait runs on the caller's loop thread; the server thread sets
+        # the event quickly so a brief blocking wait here is acceptable.
+        ready.wait()
+        if startup_error:
+            self._server_thread.join()
+            self._server_thread = None
+            raise startup_error[0]
+
+    async def _stop_server_thread(self) -> None:
+        server_loop = self._server_loop
+        if server_loop is not None and server_loop.is_running():
+
+            async def _teardown() -> None:
+                if self._bypass_session is not None:
+                    await self._bypass_session.close()
+                    self._bypass_session = None
+                if self.server is not None:
+                    await self.server.close()
+                    self.server = None
+
+            try:
+                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_teardown(), server_loop))
+            finally:
+                server_loop.call_soon_threadsafe(server_loop.stop)
+
+        if self._server_thread is not None:
+            self._server_thread.join()
+            self._server_thread = None
+        self._server_loop = None
+        self._bypass_session = None
+        self.server = None
 
     # Decorator support
-    def __call__(
-        self, f: Callable[..., Awaitable[Any]]
-    ) -> Callable[..., Awaitable[Any]]:
+    def __call__(self, f: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         @wraps(f)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             async with self as m:
                 if self.param:
                     kwargs[self.param] = m
+                elif args and hasattr(args[0], f.__name__):
+                    args = (args[0], m, *args[1:])
                 else:
-                    if args and hasattr(args[0], f.__name__):
-                        args = (args[0], m) + args[1:]
-                    else:
-                        args = args + (m,)
+                    args = (*args, m)
                 return await f(*args, **kwargs)
 
         return wrapper
@@ -332,9 +400,7 @@ class aiointercept:
             def _get_ssl_context(self, req: ClientRequest) -> SSLContext | None:
                 return _orig_ssl_ctx(self, req)  # pyright: ignore[reportPrivateUsage]
 
-        return aiohttp.ClientSession(
-            connector=_BypassConnector(resolver=_BypassResolver())
-        )
+        return aiohttp.ClientSession(connector=_BypassConnector(resolver=_BypassResolver()))
 
     def _match_pattern(self, url: str) -> bool:
         return any(p.match(url) for p in self._patterns_list)
@@ -348,10 +414,8 @@ class aiointercept:
         for obj in gc.get_objects():
             if not isinstance(obj, aiohttp.TCPConnector):
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 obj.clear_dns_cache()
-            except Exception:
-                pass
 
     async def _dispatch(self, request: web.Request) -> web.StreamResponse:
         url = normalize_url(request.url)
@@ -376,9 +440,7 @@ class aiointercept:
             "json": json,
         }
 
-        aiointercept_request = AiointerceptRequest.upgrade(
-            request, captured_body, request_kwargs
-        )
+        aiointercept_request = AiointerceptRequest.upgrade(request, captured_body, request_kwargs)
         # Read body eagerly before the handler runs, because aiohttp sets
         # PayloadAccessError on the stream once the response cycle completes.
         self.requests[key].append(aiointercept_request)
@@ -388,7 +450,7 @@ class aiointercept:
             if not selected_handler:
                 handler: handler_type | None = None
             else:
-                handler = typing.cast(handler_type, selected_handler.pop(0))
+                handler = typing.cast("handler_type", selected_handler.pop(0))
 
         else:
             handler = selected_handler
@@ -399,10 +461,7 @@ class aiointercept:
                 f"http://{original_host}{request.path_qs}",
             ]
             for (pattern, method), pattern_handler in self.patterns_handler.items():
-                if (
-                    any(pattern.match(u) for u in original_urls)
-                    and method == request.method
-                ):
+                if any(pattern.match(u) for u in original_urls) and method == request.method:
                     if isinstance(pattern_handler, list):
                         handler = pattern_handler[0]
                         remaining = pattern_handler[1:]
@@ -416,20 +475,14 @@ class aiointercept:
 
         if handler is None:
             if self._mock_external_urls and self.passthrough_unmatched:
-                scheme = request.headers.get("X-Aiointercept-Orig-Scheme") or (
-                    "https" if request.secure else "http"
-                )
+                scheme = request.headers.get("X-Aiointercept-Orig-Scheme") or ("https" if request.secure else "http")
                 real_url = f"{scheme}://{original_host}{request.path_qs}"
                 session = self._bypass_session
                 assert session is not None, "Bypass session not initialized"
                 async with session.request(
                     method=request.method,
                     url=real_url,
-                    headers={
-                        k: v
-                        for k, v in request.headers.items()
-                        if k.lower() not in _PROXY_REQ_DROP
-                    },
+                    headers={k: v for k, v in request.headers.items() if k.lower() not in _PROXY_REQ_DROP},
                     data=getattr(request, "captured_body", None) or None,
                     allow_redirects=True,
                     ssl=True,
@@ -437,11 +490,7 @@ class aiointercept:
                     body = await real_resp.read()
                     return web.Response(
                         status=real_resp.status,
-                        headers={
-                            k: v
-                            for k, v in real_resp.headers.items()
-                            if k.lower() not in _PROXY_RESP_DROP
-                        },
+                        headers={k: v for k, v in real_resp.headers.items() if k.lower() not in _PROXY_RESP_DROP},
                         body=body,
                     )
             # this should raise ClientConnectionError on the other side
@@ -449,20 +498,14 @@ class aiointercept:
                 request.transport.close()
             # Fallback in case transport.close() didn't take effect — the client
             # should normally see ClientConnectionError before reading this body.
-            return web.Response(
-                status=502, text="No handler registered for this request."
-            )
+            return web.Response(status=502, text="No handler registered for this request.")
         if handler is _CLOSE_CONNECTION:
             if request.transport:
                 request.transport.close()
             # Fallback in case transport.close() didn't take effect — the client
             # should normally see ClientConnectionError before reading this body.
-            return web.Response(
-                status=502, text="Handler registered to raise ClientConnectionError."
-            )
-        callable_handler = cast(
-            Callable[[web.Request], Awaitable[web.StreamResponse]], handler
-        )
+            return web.Response(status=502, text="Handler registered to raise ClientConnectionError.")
+        callable_handler = cast("Callable[[web.Request], Awaitable[web.StreamResponse]]", handler)
         return await callable_handler(request)
 
     def add(
@@ -476,8 +519,7 @@ class aiointercept:
         headers: Mapping[str, str] | None = None,
         repeat: bool | int = False,
         content_type: str | None = None,
-        callback: Callable[..., CallbackResult | Awaitable[CallbackResult]]
-        | None = None,
+        callback: Callable[..., CallbackResult | Awaitable[CallbackResult]] | None = None,
         reason: str | None = None,
         exception: Exception | bool | None = None,
     ) -> None:
@@ -503,11 +545,10 @@ class aiointercept:
                 client.  Passing a specific exception instance logs a warning;
                 pass ``exception=True`` to suppress it.
         """
-        if exception:
-            if exception is not True:
-                logger.warning(
-                    "aiointercept only raise ClientConnectionError, pass exception=True instead of an specific exception"
-                )
+        if exception and exception is not True:
+            logger.warning(
+                "aiointercept only raise ClientConnectionError, pass exception=True instead of an specific exception"
+            )
         method = method.upper()
         if isinstance(url, str):
             url = URL(url)
@@ -515,9 +556,7 @@ class aiointercept:
         if isinstance(url, Pattern):
             self._patterns_list.append(url)
 
-        assert self.server is not None, (
-            "Server not started — use `async with aiointercept() as m:` first."
-        )
+        assert self.server is not None, "Server not started — use `async with aiointercept() as m:` first."
         if isinstance(url, URL):
             host = url.host
             assert host, f"Cannot extract host from {url!r}"
@@ -538,12 +577,24 @@ class aiointercept:
 
         async def handler(request: web.Request) -> web.Response:
             if callable(callback):
+                cb_kwargs = cast("AiointerceptRequest", request).kwargs
                 if inspect.iscoroutinefunction(callback):
-                    result = await callback(
-                        url, **cast(AiointerceptRequest, request).kwargs
-                    )
+                    # Async callbacks run on the caller's loop so that
+                    # loop-bound primitives (asyncio.Event, asyncio.Queue,
+                    # asyncio.Lock created by the test) keep working.
+                    caller_loop = self._caller_loop
+                    if (
+                        caller_loop is not None
+                        and not caller_loop.is_closed()
+                        and caller_loop is not asyncio.get_running_loop()
+                    ):
+                        result = await asyncio.wrap_future(
+                            asyncio.run_coroutine_threadsafe(callback(url, **cb_kwargs), caller_loop)
+                        )
+                    else:
+                        result = await callback(url, **cb_kwargs)
                 else:
-                    result = callback(url, **cast(AiointerceptRequest, request).kwargs)
+                    result = callback(url, **cb_kwargs)
                 _status = result.status
                 _body = result.body
                 _headers = result.headers or {}
@@ -583,13 +634,12 @@ class aiointercept:
                 if (url, method) in self.patterns_handler:
                     list_pattern_handler = self.patterns_handler[(url, method)]
                     if isinstance(list_pattern_handler, list):
-                        list_pattern_handler = typing.cast(
-                            list[handler_type], list_pattern_handler
-                        )
+                        list_pattern_handler = typing.cast("list[handler_type]", list_pattern_handler)
                         list_pattern_handler += handlers
                     else:
                         raise ValueError(
-                            f"Existing handler for pattern {url} {method} has repeat=True, cannot add more handlers to it."
+                            f"Existing handler for pattern {url} {method} has "
+                            "repeat=True, cannot add more handlers to it."
                         )
 
                 else:
@@ -599,7 +649,7 @@ class aiointercept:
             if (handler_url, method) in self.handlers:
                 handlers_list = self.handlers[(handler_url, method)]
                 if isinstance(handlers_list, list):
-                    handlers_list = typing.cast(list[handler_type], handlers_list)
+                    handlers_list = typing.cast("list[handler_type]", handlers_list)
                     handlers_list += handlers
                 else:
                     raise ValueError(
@@ -653,9 +703,7 @@ class aiointercept:
     def assert_not_called(self) -> None:
         """Assert that no requests were made."""
         if self.requests:
-            raise AssertionError(
-                f"Expected no calls, got {sum(len(v) for v in self.requests.values())}."
-            )
+            raise AssertionError(f"Expected no calls, got {sum(len(v) for v in self.requests.values())}.")
 
     def assert_called_once(self) -> None:
         """Assert that exactly one request was made across all URLs."""
@@ -706,7 +754,8 @@ class aiointercept:
         """
         if kwargs:
             warnings.warn(
-                "Passing extra parameters to assert_called_with via kwargs is deprecated and will be removed in a future release.",
+                "Passing extra parameters to assert_called_with via kwargs is "
+                "deprecated and will be removed in a future release.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -721,14 +770,9 @@ class aiointercept:
             actual_body_str = actual_body.decode(errors="replace")
             try:
                 actual_json = json_module.loads(actual_body_str)  # type: ignore[attr-defined]
-            except Exception:
-                raise AssertionError(
-                    f"Expected JSON body {json!r}, got non-JSON body {actual_body!r}"
-                )
-            assert actual_json == json, (
-                f"Expected JSON body {json!r}, got {actual_json!r} "
-                f"(raw body {actual_body!r})"
-            )
+            except Exception as exc:
+                raise AssertionError(f"Expected JSON body {json!r}, got non-JSON body {actual_body!r}") from exc
+            assert actual_json == json, f"Expected JSON body {json!r}, got {actual_json!r} (raw body {actual_body!r})"
         elif data is not None:
             if not isinstance(data, (str, bytes)):
                 actual_ct = request.headers.get("Content-Type", "")
@@ -740,24 +784,15 @@ class aiointercept:
                     )
                 actual_qs = parse_qs(actual_body.decode(errors="replace"))
                 expected_qs = parse_qs(urlencode(sorted(data.items())))
-                assert actual_qs == expected_qs, (
-                    f"Expected body {data!r} (form encoded), got {actual_body!r}"
-                )
+                assert actual_qs == expected_qs, f"Expected body {data!r} (form encoded), got {actual_body!r}"
             else:
-                if isinstance(data, str):
-                    expected_body = data.encode()
-                else:
-                    expected_body = data
-                assert actual_body == expected_body, (
-                    f"Expected body {expected_body!r}, got {actual_body!r}"
-                )
+                expected_body = data.encode() if isinstance(data, str) else data
+                assert actual_body == expected_body, f"Expected body {expected_body!r}, got {actual_body!r}"
         if strict_headers:
             actual_headers = request.headers.copy()
             actual_headers.pop("x-aiointercept-orig-scheme", None)
             expected_headers = headers or {}
-            assert expected_headers == actual_headers, (
-                f"Expected headers {expected_headers!r}, got {actual_headers!r}"
-            )
+            assert expected_headers == actual_headers, f"Expected headers {expected_headers!r}, got {actual_headers!r}"
         elif headers:
             actual_headers_proxy = request.headers
             for k, v in headers.items():
@@ -778,6 +813,4 @@ class aiointercept:
     ) -> None:
         """Assert that exactly one request was made and it matched the given arguments."""
         self.assert_called_once()
-        self.assert_called_with(
-            url, method, params, data, json, headers, strict_headers, **kwargs
-        )
+        self.assert_called_with(url, method, params, data, json, headers, strict_headers, **kwargs)
