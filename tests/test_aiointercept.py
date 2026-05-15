@@ -13,6 +13,8 @@ from random import uniform
 from aiointercept import aiointercept, CallbackResult
 from tests.conftest import network_retry
 
+import threading
+import concurrent.futures
 # ---------------------------------------------------------------------------
 # Basic mock_external_urls=True (DNS patched) vs False (direct to server)
 # ---------------------------------------------------------------------------
@@ -1232,8 +1234,6 @@ async def test_caller_loop_blocked_does_not_deadlock():
     a request — the pattern Starlette/FastAPI TestClient produces — the intercept
     server must still accept and serve the connection. The server runs on its
     own thread + loop, so this works by construction."""
-    import threading
-    import concurrent.futures
 
     async with aiointercept(mock_external_urls=True) as m:
         m.get("http://blocked.test/api", status=200, body=b"served")
