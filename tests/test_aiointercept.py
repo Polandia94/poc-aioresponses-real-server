@@ -1,20 +1,21 @@
 """Tests for aiointercept.core targeting ~100% coverage."""
 
-import re
-import pytest
-import aiohttp
-from aiohttp import ClientSession
-from aiohttp.client_exceptions import ClientConnectionError
-from yarl import URL
-from aiohttp.resolver import ThreadedResolver, AsyncResolver
 import asyncio
+import concurrent.futures
+import re
+import threading
 from random import uniform
 
-from aiointercept import aiointercept, CallbackResult
+import aiohttp
+import pytest
+from aiohttp import ClientSession
+from aiohttp.client_exceptions import ClientConnectionError
+from aiohttp.resolver import AsyncResolver, ThreadedResolver
+from yarl import URL
+
+from aiointercept import CallbackResult, aiointercept
 from tests.conftest import network_retry
 
-import threading
-import concurrent.futures
 # ---------------------------------------------------------------------------
 # Basic mock_external_urls=True (DNS patched) vs False (direct to server)
 # ---------------------------------------------------------------------------
@@ -22,12 +23,11 @@ import concurrent.futures
 
 async def test_mock_external_urls_true_basic():
     """DNS is patched so requests to example.com are intercepted and served by the mock."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/hello", status=200, body=b"hi")
-            resp = await session.get("http://example.com/hello")
-            assert resp.status == 200
-            assert await resp.read() == b"hi"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/hello", status=200, body=b"hi")
+        resp = await session.get("http://example.com/hello")
+        assert resp.status == 200
+        assert await resp.read() == b"hi"
 
 
 async def test_mock_external_urls_false_uses_server_host_port():
@@ -43,10 +43,9 @@ async def test_mock_external_urls_false_uses_server_host_port():
 
 async def test_requests_outside_manager():
     """check requests outside the context manager works"""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/hello", status=200, body=b"hi")
-            await session.get("http://example.com/hello")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/hello", status=200, body=b"hi")
+        await session.get("http://example.com/hello")
 
     m.assert_called_once_with("http://example.com/hello", method="GET")
 
@@ -65,32 +64,29 @@ async def test_requests_outside_manager():
 )
 async def test_add_string_and_url_object(url_input: str | URL):
     """Both plain strings and yarl URL objects are accepted as mock targets."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(url_input, method="GET", status=200, body=b"ok")
-            resp = await session.get("http://api.test/items")
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(url_input, method="GET", status=200, body=b"ok")
+        resp = await session.get("http://api.test/items")
+        assert resp.status == 200
 
 
 async def test_add_pattern():
     """A compiled regex pattern matches any URL that satisfies the expression."""
     pattern = re.compile(r"^http://api\.test/items/\d+$")
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(pattern, method="GET", status=200, body=b"item")
-            resp = await session.get("http://api.test/items/42")
-            assert resp.status == 200
-            assert await resp.read() == b"item"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(pattern, method="GET", status=200, body=b"item")
+        resp = await session.get("http://api.test/items/42")
+        assert resp.status == 200
+        assert await resp.read() == b"item"
 
 
 async def test_pattern_no_match_raises():
     """A URL that does not satisfy the registered pattern raises ClientConnectionError."""
     pattern = re.compile(r"^http://api\.test/items/\d+$")
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(pattern, method="GET", status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://api.test/items/abc")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(pattern, method="GET", status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://api.test/items/abc")
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +95,7 @@ async def test_pattern_no_match_raises():
 
 
 @pytest.mark.parametrize(
-    "method,shortcut",
+    ("method", "shortcut"),
     [
         ("GET", "get"),
         ("POST", "post"),
@@ -112,11 +108,10 @@ async def test_pattern_no_match_raises():
 async def test_method_shortcuts(method, shortcut):
     """Each HTTP verb has a convenience shortcut method on the mock object."""
     url = "http://shortcuts.test/path"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            getattr(m, shortcut)(url, status=200)
-            resp = await session.request(method, url)
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        getattr(m, shortcut)(url, status=200)
+        resp = await session.request(method, url)
+        assert resp.status == 200
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +120,7 @@ async def test_method_shortcuts(method, shortcut):
 
 
 @pytest.mark.parametrize(
-    "kwargs,expected_body",
+    ("kwargs", "expected_body"),
     [
         ({"body": b"bytes"}, b"bytes"),
         ({"body": "string"}, b"string"),
@@ -135,11 +130,10 @@ async def test_method_shortcuts(method, shortcut):
 )
 async def test_response_body_variants(kwargs, expected_body):
     """body (bytes or str), json, and payload are all serialised to the expected bytes."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://body.test/", **kwargs)
-            resp = await session.get("http://body.test/")
-            assert await resp.read() == expected_body
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://body.test/", **kwargs)
+        resp = await session.get("http://body.test/")
+        assert await resp.read() == expected_body
 
 
 # ---------------------------------------------------------------------------
@@ -149,47 +143,43 @@ async def test_response_body_variants(kwargs, expected_body):
 
 async def test_repeat_true_infinite():
     """repeat=True keeps the handler registered indefinitely for any number of calls."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://repeat.test/", status=200, repeat=True)
-            for _ in range(5):
-                resp = await session.get("http://repeat.test/")
-                assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://repeat.test/", status=200, repeat=True)
+        for _ in range(5):
+            resp = await session.get("http://repeat.test/")
+            assert resp.status == 200
 
 
 async def test_repeat_false_once():
     """repeat=False (default) consumes the handler after a single call; subsequent calls raise."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://repeat.test/once", status=200, repeat=False)
-            resp = await session.get("http://repeat.test/once")
-            assert resp.status == 200
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://repeat.test/once")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://repeat.test/once", status=200, repeat=False)
+        resp = await session.get("http://repeat.test/once")
+        assert resp.status == 200
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://repeat.test/once")
 
 
 @pytest.mark.parametrize("n", [2, 3])
 async def test_repeat_integer(n):
     """repeat=N allows exactly N calls before the handler is exhausted."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://repeat.test/n", status=200, repeat=n)
-            for _ in range(n):
-                resp = await session.get("http://repeat.test/n")
-                assert resp.status == 200
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://repeat.test/n")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://repeat.test/n", status=200, repeat=n)
+        for _ in range(n):
+            resp = await session.get("http://repeat.test/n")
+            assert resp.status == 200
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://repeat.test/n")
 
 
 async def test_repeat_zero():
     """repeat=0 is treated identically to repeat=False (respond exactly once)."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://repeat.test/once", status=200, repeat=0)
-            resp = await session.get("http://repeat.test/once")
-            assert resp.status == 200
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://repeat.test/once")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://repeat.test/once", status=200, repeat=0)
+        resp = await session.get("http://repeat.test/once")
+        assert resp.status == 200
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://repeat.test/once")
 
 
 # ---------------------------------------------------------------------------
@@ -200,24 +190,22 @@ async def test_repeat_zero():
 async def test_pattern_repeat_true():
     """A pattern handler with repeat=True serves every matching URL without expiring."""
     pattern = re.compile(r"^http://pat\.test/.*$")
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(pattern, method="GET", status=200, repeat=True)
-            for i in range(3):
-                resp = await session.get(f"http://pat.test/path{i}")
-                assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(pattern, method="GET", status=200, repeat=True)
+        for i in range(3):
+            resp = await session.get(f"http://pat.test/path{i}")
+            assert resp.status == 200
 
 
 async def test_pattern_repeat_integer():
     """A pattern handler with repeat=2 is consumed after exactly two matching requests."""
     pattern = re.compile(r"^http://pat\.test/path$")
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(pattern, method="GET", status=200, repeat=2)
-            resp = await session.get("http://pat.test/path")
-            assert resp.status == 200
-            resp = await session.get("http://pat.test/path")
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(pattern, method="GET", status=200, repeat=2)
+        resp = await session.get("http://pat.test/path")
+        assert resp.status == 200
+        resp = await session.get("http://pat.test/path")
+        assert resp.status == 200
 
 
 async def test_pattern_repeat_error_mixing_repeat_true_and_list():
@@ -225,7 +213,7 @@ async def test_pattern_repeat_error_mixing_repeat_true_and_list():
     pattern = re.compile(r"^http://mix\.test/.*$")
     async with aiointercept(mock_external_urls=True) as m:
         m.add(pattern, method="GET", status=200, repeat=True)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="repeat=True, cannot add more handlers"):
             m.add(pattern, method="GET", status=201, repeat=1)
 
 
@@ -233,7 +221,7 @@ async def test_url_repeat_error_mixing_repeat_true_and_list():
     """Adding a finite repeat after an infinite repeat=True on the same URL raises ValueError."""
     async with aiointercept(mock_external_urls=True) as m:
         m.get("http://mix.test/path", status=200, repeat=True)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="repeat=True, cannot add more handlers"):
             m.get("http://mix.test/path", status=201, repeat=1)
 
 
@@ -248,12 +236,11 @@ async def test_sync_callback():
     def cb(url, **kwargs):
         return CallbackResult(status=202, body=b"cb-sync")
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://cb.test/", callback=cb)
-            resp = await session.get("http://cb.test/")
-            assert resp.status == 202
-            assert await resp.read() == b"cb-sync"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://cb.test/", callback=cb)
+        resp = await session.get("http://cb.test/")
+        assert resp.status == 202
+        assert await resp.read() == b"cb-sync"
 
 
 async def test_async_callback():
@@ -262,11 +249,10 @@ async def test_async_callback():
     async def cb(url, **kwargs):
         return CallbackResult(status=203, body=b"cb-async")
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://cb.test/async", callback=cb)
-            resp = await session.get("http://cb.test/async")
-            assert resp.status == 203
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://cb.test/async", callback=cb)
+        resp = await session.get("http://cb.test/async")
+        assert resp.status == 203
 
 
 async def test_callback_with_payload():
@@ -275,12 +261,11 @@ async def test_callback_with_payload():
     def cb(url, **kwargs):
         return CallbackResult(status=200, payload={"key": "val"})
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://cb.test/payload", callback=cb)
-            resp = await session.get("http://cb.test/payload")
-            data = await resp.json()
-            assert data == {"key": "val"}
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://cb.test/payload", callback=cb)
+        resp = await session.get("http://cb.test/payload")
+        data = await resp.json()
+        assert data == {"key": "val"}
 
 
 # ---------------------------------------------------------------------------
@@ -291,24 +276,23 @@ async def test_callback_with_payload():
 @network_retry
 async def test_passthrough_host_is_allowed():
     """Passthrough host resolves normally (hits real network)."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough=["http://httpbin.org/status/200"]
-        ) as m:
-            m.get("http://example.com/", status=200)
-            mocked = await session.get("http://example.com/")
-            assert mocked.status == 200
-            real = await session.get("http://httpbin.org/status/200")
-            assert real.status == 200
+    async with (
+        ClientSession() as session,
+        aiointercept(mock_external_urls=True, passthrough=["http://httpbin.org/status/200"]) as m,
+    ):
+        m.get("http://example.com/", status=200)
+        mocked = await session.get("http://example.com/")
+        assert mocked.status == 200
+        real = await session.get("http://httpbin.org/status/200")
+        assert real.status == 200
 
 
 async def test_registered_host_missing_path_raises():
     """Registered host with an unregistered path raises ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/registered", status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://example.com/not-registered")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/registered", status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://example.com/not-registered")
 
 
 # ---------------------------------------------------------------------------
@@ -319,26 +303,20 @@ async def test_registered_host_missing_path_raises():
 @network_retry
 async def test_passthrough_unmatched_allows_real_requests():
     """Requests without a registered handler pass through to the network."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.get("http://example.com/mocked", status=200, body=b"mocked")
-            mocked = await session.get("http://example.com/mocked")
-            assert mocked.status == 200
-            real = await session.get("http://httpbin.org/status/201")
-            assert real.status == 201
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.get("http://example.com/mocked", status=200, body=b"mocked")
+        mocked = await session.get("http://example.com/mocked")
+        assert mocked.status == 200
+        real = await session.get("http://httpbin.org/status/201")
+        assert real.status == 201
 
 
 async def test_passthrough_unmatched_false_raises_for_unknown():
     """With passthrough_unmatched=False, any unregistered host raises ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=False
-        ) as m:
-            m.get("http://example.com/", status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://unregistered.test/foo")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=False) as m:
+        m.get("http://example.com/", status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://unregistered.test/foo")
 
 
 @network_retry
@@ -350,17 +328,14 @@ async def test_passthrough_unmatched_with_pattern_proxies_unmatched():
     looping back to the test server.
     """
     pattern = re.compile(r"^http://pat\.test/specific$")
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.add(pattern, method="GET", status=200, repeat=True)
-            # Matched: mock response
-            resp_mocked = await session.get("http://pat.test/specific")
-            assert resp_mocked.status == 200
-            # Unmatched: proxied via real DNS to the actual server
-            resp_real = await session.get("http://httpbin.org/status/201")
-            assert resp_real.status == 201
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.add(pattern, method="GET", status=200, repeat=True)
+        # Matched: mock response
+        resp_mocked = await session.get("http://pat.test/specific")
+        assert resp_mocked.status == 200
+        # Unmatched: proxied via real DNS to the actual server
+        resp_real = await session.get("http://httpbin.org/status/201")
+        assert resp_real.status == 201
 
 
 # ---------------------------------------------------------------------------
@@ -370,29 +345,26 @@ async def test_passthrough_unmatched_with_pattern_proxies_unmatched():
 
 async def test_no_handler_returns_connection_error():
     """A request to a path with no registered handler raises ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as _m:
-            _m.get("http://example.com/", status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://example.com/missing")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as _m:
+        _m.get("http://example.com/", status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://example.com/missing")
 
 
 async def test_exception_parameter_causes_connection_error():
     """exception= registers a handler that closes the connection, raising ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/err", exception=Exception("boom"), status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://example.com/err")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/err", exception=Exception("boom"), status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://example.com/err")
 
 
 async def test_method_mismatch_raises():
     """A POST to a GET-only handler raises ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/meth", status=200)
-            with pytest.raises(ClientConnectionError):
-                await session.post("http://example.com/meth")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/meth", status=200)
+        with pytest.raises(ClientConnectionError):
+            await session.post("http://example.com/meth")
 
 
 async def test_add_without_server_raises():
@@ -409,26 +381,24 @@ async def test_add_without_server_raises():
 
 async def test_assert_called_and_not_called():
     """assert_called() and assert_not_called() reflect whether any request was made."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/assert", status=200)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/assert", status=200)
+        m.assert_not_called()
+        await session.get("http://example.com/assert")
+        m.assert_called()
+        with pytest.raises(AssertionError):
             m.assert_not_called()
-            await session.get("http://example.com/assert")
-            m.assert_called()
-            with pytest.raises(AssertionError):
-                m.assert_not_called()
 
 
 async def test_assert_called_once():
     """assert_called_once() passes after exactly one request and fails after a second."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/once", status=200, repeat=True)
-            await session.get("http://example.com/once")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/once", status=200, repeat=True)
+        await session.get("http://example.com/once")
+        m.assert_called_once()
+        await session.get("http://example.com/once")
+        with pytest.raises(AssertionError):
             m.assert_called_once()
-            await session.get("http://example.com/once")
-            with pytest.raises(AssertionError):
-                m.assert_called_once()
 
 
 async def test_assert_called_never_raises():
@@ -440,88 +410,80 @@ async def test_assert_called_never_raises():
 
 async def test_assert_any_call():
     """assert_any_call() passes for a URL that was requested and fails for one that was not."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/any", status=200)
-            await session.get("http://example.com/any")
-            m.assert_any_call("http://example.com/any")
-            with pytest.raises(AssertionError):
-                m.assert_any_call("http://example.com/other")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/any", status=200)
+        await session.get("http://example.com/any")
+        m.assert_any_call("http://example.com/any")
+        with pytest.raises(AssertionError):
+            m.assert_any_call("http://example.com/other")
 
 
 async def test_assert_called_with_json():
     """assert_called_with() matches the JSON body sent in the request."""
     url = "http://example.com/json"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, json={"x": 1})
-            m.assert_called_with(url, method="POST", json={"x": 1})
-            with pytest.raises(AssertionError):
-                m.assert_called_with(url, method="POST", json={"x": 2})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, json={"x": 1})
+        m.assert_called_with(url, method="POST", json={"x": 1})
+        with pytest.raises(AssertionError):
+            m.assert_called_with(url, method="POST", json={"x": 2})
 
 
 async def test_assert_called_with_data_bytes():
     """assert_called_with() matches raw bytes sent as the request body."""
     url = "http://example.com/data"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, data=b"rawbytes")
-            m.assert_called_with(url, method="POST", data=b"rawbytes")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, data=b"rawbytes")
+        m.assert_called_with(url, method="POST", data=b"rawbytes")
 
 
 async def test_assert_called_with_data_string():
     """assert_called_with() matches a plain string sent as the request body."""
     url = "http://example.com/strdata"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, data="hello")
-            m.assert_called_with(url, method="POST", data="hello")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, data="hello")
+        m.assert_called_with(url, method="POST", data="hello")
 
 
 async def test_assert_called_with_data_dict():
     """assert_called_with() matches a form-encoded dict sent as the request body."""
     url = "http://example.com/formdata"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, data={"field": "value"})
-            m.assert_called_with(url, method="POST", data={"field": "value"})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, data={"field": "value"})
+        m.assert_called_with(url, method="POST", data={"field": "value"})
 
 
 async def test_assert_called_with_headers():
     """assert_called_with() matches specific request headers and fails on wrong values."""
     url = "http://example.com/headers"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url, headers={"X-Custom": "yes"})
-            m.assert_called_with(url, headers={"X-Custom": "yes"})
-            with pytest.raises(AssertionError):
-                m.assert_called_with(url, headers={"X-Custom": "no"})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url, headers={"X-Custom": "yes"})
+        m.assert_called_with(url, headers={"X-Custom": "yes"})
+        with pytest.raises(AssertionError):
+            m.assert_called_with(url, headers={"X-Custom": "no"})
 
 
 async def test_assert_called_once_with():
     """assert_called_once_with() passes when the URL was called exactly once."""
     url = "http://example.com/oncewith"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url)
-            m.assert_called_once_with(url)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url)
+        m.assert_called_once_with(url)
 
 
 async def test_assert_called_with_wrong_url():
     """assert_called_with() raises AssertionError when the URL does not match what was called."""
     url = "http://example.com/x"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url)
-            with pytest.raises(AssertionError):
-                m.assert_called_with("http://example.com/y")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url)
+        with pytest.raises(AssertionError):
+            m.assert_called_with("http://example.com/y")
 
 
 # ---------------------------------------------------------------------------
@@ -532,31 +494,29 @@ async def test_assert_called_with_wrong_url():
 async def test_clear_resets_state():
     """clear() empties all recorded requests and registered handlers."""
     url = "http://example.com/clear"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url)
-            m.assert_called()
-            m.clear()
-            m.assert_not_called()
-            assert len(m.handlers) == 0
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url)
+        m.assert_called()
+        m.clear()
+        m.assert_not_called()
+        assert len(m.handlers) == 0
 
 
 async def test_clear_allows_reregistering():
     """After clear(), new handlers can be registered and matched independently."""
     url = "http://example.com/clear-reuse"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            resp = await session.get(url)
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        resp = await session.get(url)
+        assert resp.status == 200
 
-            m.clear()
+        m.clear()
 
-            m.get(url, status=201)
-            resp = await session.get(url)
-            assert resp.status == 201
-            m.assert_called_once()
+        m.get(url, status=201)
+        resp = await session.get(url)
+        assert resp.status == 201
+        m.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +561,7 @@ async def test_decorator_with_param():
 
 async def test_extra_kwargs_deprecation_warning():
     """Unknown keyword arguments trigger a DeprecationWarning at construction time."""
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(DeprecationWarning, match="Passing extra parameters to aiointercept"):
         m = aiointercept(mock_external_urls=True, unknown_param="foo")
     async with m:
         pass
@@ -615,13 +575,12 @@ async def test_extra_kwargs_deprecation_warning():
 async def test_multiple_queued_responses():
     """Multiple add() calls for the same URL queue responses returned in FIFO order."""
     url = "http://example.com/queue"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            m.get(url, status=201)
-            m.get(url, status=202)
-            statuses = [(await session.get(url)).status for _ in range(3)]
-            assert statuses == [200, 201, 202]
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        m.get(url, status=201)
+        m.get(url, status=202)
+        statuses = [(await session.get(url)).status for _ in range(3)]
+        assert statuses == [200, 201, 202]
 
 
 # ---------------------------------------------------------------------------
@@ -632,14 +591,13 @@ async def test_multiple_queued_responses():
 async def test_requests_dict_populated():
     """Every intercepted request is recorded in m.requests keyed by (method, URL)."""
     url = "http://example.com/req"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200, repeat=True)
-            await session.get(url)
-            await session.get(url)
-            key = ("GET", URL(url))
-            assert key in m.requests
-            assert len(m.requests[key]) == 2
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200, repeat=True)
+        await session.get(url)
+        await session.get(url)
+        key = ("GET", URL(url))
+        assert key in m.requests
+        assert len(m.requests[key]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -650,11 +608,10 @@ async def test_requests_dict_populated():
 async def test_head_method():
     """The head() shortcut registers a handler for HTTP HEAD requests."""
     url = "http://example.com/head"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.head(url, status=200)
-            resp = await session.head(url)
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.head(url, status=200)
+        resp = await session.head(url)
+        assert resp.status == 200
 
 
 # ---------------------------------------------------------------------------
@@ -665,12 +622,11 @@ async def test_head_method():
 async def test_url_with_query_params():
     """Query string parameters in the registered URL are matched correctly."""
     url = "http://queryparams.test/search?q=test&page=1"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            resp = await session.get(url)
-            assert resp.status == 200
-            m.assert_called_with(url)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        resp = await session.get(url)
+        assert resp.status == 200
+        m.assert_called_with(url)
 
 
 # ---------------------------------------------------------------------------
@@ -681,25 +637,23 @@ async def test_url_with_query_params():
 async def test_assert_any_call_with_params():
     """assert_any_call() accepts a params dict and matches it against the query string."""
     url = "http://anycallparams.test/items"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url + "?key=val", status=200)
-            await session.get(url, params={"key": "val"})
-            m.assert_any_call(url, params={"key": "val"})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url + "?key=val", status=200)
+        await session.get(url, params={"key": "val"})
+        m.assert_any_call(url, params={"key": "val"})
 
 
 async def test_url_with_different_query_param():
     """Registering ?page=1 (repeat=True) must not serve a request to ?page=2."""
     url = "http://queryparams.test/search?q=test&page=1"
     diff_url = "http://queryparams.test/search?q=test&page=2"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200, repeat=True)
-            resp = await session.get(url)
-            assert resp.status == 200
-            m.assert_called_with(url)
-            with pytest.raises(ClientConnectionError):
-                await session.get(diff_url)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200, repeat=True)
+        resp = await session.get(url)
+        assert resp.status == 200
+        m.assert_called_with(url)
+        with pytest.raises(ClientConnectionError):
+            await session.get(diff_url)
 
 
 # ---------------------------------------------------------------------------
@@ -765,14 +719,13 @@ async def test_decorator_on_class_method():
 async def test_pattern_handler_list_extended():
     """Adding a second pattern handler to an existing list accumulates them."""
     pattern = re.compile(r"^http://extpat\.test/p$")
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.add(pattern, method="GET", status=200, repeat=1)
-            m.add(pattern, method="GET", status=201, repeat=1)
-            r1 = await session.get("http://extpat.test/p")
-            r2 = await session.get("http://extpat.test/p")
-            assert r1.status == 200
-            assert r2.status == 201
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.add(pattern, method="GET", status=200, repeat=1)
+        m.add(pattern, method="GET", status=201, repeat=1)
+        r1 = await session.get("http://extpat.test/p")
+        r2 = await session.get("http://extpat.test/p")
+        assert r1.status == 200
+        assert r2.status == 201
 
 
 # ---------------------------------------------------------------------------
@@ -783,27 +736,25 @@ async def test_pattern_handler_list_extended():
 async def test_redirect_followed():
     """A 307 response with a Location header causes aiohttp to follow the redirect."""
     base = "http://redirect.test"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(f"{base}/start", status=307, headers={"Location": f"{base}/end"})
-            m.get(f"{base}/end", status=200, body=b"final")
-            resp = await session.get(f"{base}/start", allow_redirects=True)
-            assert resp.status == 200
-            assert await resp.read() == b"final"
-            assert len(resp.history) == 1
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(f"{base}/start", status=307, headers={"Location": f"{base}/end"})
+        m.get(f"{base}/end", status=200, body=b"final")
+        resp = await session.get(f"{base}/start", allow_redirects=True)
+        assert resp.status == 200
+        assert await resp.read() == b"final"
+        assert len(resp.history) == 1
 
 
 async def test_redirect_missing_mock_raises():
     """A redirect whose Location is not mocked raises ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(
-                "http://redirect.test/only",
-                status=307,
-                headers={"Location": "http://redirect.test/missing"},
-            )
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://redirect.test/only", allow_redirects=True)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(
+            "http://redirect.test/only",
+            status=307,
+            headers={"Location": "http://redirect.test/missing"},
+        )
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://redirect.test/only", allow_redirects=True)
 
 
 # ---------------------------------------------------------------------------
@@ -815,23 +766,21 @@ async def test_raise_for_status_on_response():
     """Calling raise_for_status() on a 4xx response raises ClientResponseError."""
     from aiohttp.client_exceptions import ClientResponseError
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/bad", status=400)
-            resp = await session.get("http://example.com/bad")
-            with pytest.raises(ClientResponseError):
-                resp.raise_for_status()
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/bad", status=400)
+        resp = await session.get("http://example.com/bad")
+        with pytest.raises(ClientResponseError):
+            resp.raise_for_status()
 
 
 async def test_raise_for_status_session_level():
     """A session with raise_for_status=True automatically raises on 4xx."""
     from aiohttp.client_exceptions import ClientResponseError
 
-    async with ClientSession(raise_for_status=True) as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://example.com/err", status=500)
-            with pytest.raises(ClientResponseError):
-                await session.get("http://example.com/err")
+    async with ClientSession(raise_for_status=True) as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://example.com/err", status=500)
+        with pytest.raises(ClientResponseError):
+            await session.get("http://example.com/err")
 
 
 # ---------------------------------------------------------------------------
@@ -841,44 +790,40 @@ async def test_raise_for_status_session_level():
 
 async def test_mock_https_url():
     """An https:// URL can be registered and mocked; no real TLS is used."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.patch("https://secure.test/data", status=200, body=b"secret")
-            resp = await session.patch("https://secure.test/data")
-            assert resp.status == 200
-            assert await resp.read() == b"secret"
-            m.patch("https://secure.test/data", status=200, body=b"secret")
-            resp = await session.patch("https://secure.test/data")
-            assert resp.status == 200
-            assert await resp.read() == b"secret"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.patch("https://secure.test/data", status=200, body=b"secret")
+        resp = await session.patch("https://secure.test/data")
+        assert resp.status == 200
+        assert await resp.read() == b"secret"
+        m.patch("https://secure.test/data", status=200, body=b"secret")
+        resp = await session.patch("https://secure.test/data")
+        assert resp.status == 200
+        assert await resp.read() == b"secret"
 
 
 @network_retry
 async def test_passthrough_https_explicit():
     """An https:// URL in the passthrough list reaches the real server with TLS."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough=["https://httpbin.org/status/201"]
-        ) as m:
-            m.get("http://example.com/", status=200)
-            mocked = await session.get("http://example.com/")
-            assert mocked.status == 200
-            real = await session.get("https://httpbin.org/status/201")
-            assert real.status == 201
+    async with (
+        ClientSession() as session,
+        aiointercept(mock_external_urls=True, passthrough=["https://httpbin.org/status/201"]) as m,
+    ):
+        m.get("http://example.com/", status=200)
+        mocked = await session.get("http://example.com/")
+        assert mocked.status == 200
+        real = await session.get("https://httpbin.org/status/201")
+        assert real.status == 201
 
 
 @network_retry
 async def test_passthrough_unmatched_https_no_patterns():
     """With passthrough_unmatched=True and no patterns, HTTPS goes via real DNS directly."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.get("http://example.com/mocked", status=200, body=b"mocked")
-            mocked = await session.get("http://example.com/mocked")
-            assert mocked.status == 200
-            real = await session.get("https://httpbin.org/status/200")
-            assert real.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.get("http://example.com/mocked", status=200, body=b"mocked")
+        mocked = await session.get("http://example.com/mocked")
+        assert mocked.status == 200
+        real = await session.get("https://httpbin.org/status/200")
+        assert real.status == 200
 
 
 @network_retry
@@ -890,13 +835,10 @@ async def test_passthrough_unmatched_https_with_patterns():
     which uses _BypassConnector (unpatched _get_ssl_context) for real TLS.
     """
     pattern = re.compile(r"^http://never\.matches/.*$")
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.add(pattern, method="GET", status=200, repeat=True)
-            resp = await session.get("https://httpbin.org/status/200")
-            assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.add(pattern, method="GET", status=200, repeat=True)
+        resp = await session.get("https://httpbin.org/status/200")
+        assert resp.status == 200
 
 
 async def test_nested_mock_external_urls_instances():
@@ -906,23 +848,22 @@ async def test_nested_mock_external_urls_instances():
     real_threaded = ThreadedResolver.resolve
     real_async = AsyncResolver.resolve
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as outer:
-            outer.get("http://outer.test/", status=200, body=b"outer", repeat=True)
-            async with aiointercept(mock_external_urls=True) as inner:
-                inner.get("http://inner.test/", status=200, body=b"inner")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as outer:
+        outer.get("http://outer.test/", status=200, body=b"outer", repeat=True)
+        async with aiointercept(mock_external_urls=True) as inner:
+            inner.get("http://inner.test/", status=200, body=b"inner")
 
-                resp_outer = await session.get("http://outer.test/")
-                assert resp_outer.status == 200
-                assert await resp_outer.read() == b"outer"
+            resp_outer = await session.get("http://outer.test/")
+            assert resp_outer.status == 200
+            assert await resp_outer.read() == b"outer"
 
-                resp_inner = await session.get("http://inner.test/")
-                assert resp_inner.status == 200
-                assert await resp_inner.read() == b"inner"
+            resp_inner = await session.get("http://inner.test/")
+            assert resp_inner.status == 200
+            assert await resp_inner.read() == b"inner"
 
-            # After inner exits, outer still works
-            resp_outer2 = await session.get("http://outer.test/")
-            assert resp_outer2.status == 200
+        # After inner exits, outer still works
+        resp_outer2 = await session.get("http://outer.test/")
+        assert resp_outer2.status == 200
 
     # After both exit, class-level methods are fully restored
     assert ThreadedResolver.resolve is real_threaded
@@ -946,9 +887,7 @@ async def test_https_request_recorded_under_https_scheme():
         https_key = ("GET", URL("https://secure.test/data"))
         http_key = ("GET", URL("http://secure.test/data"))
         assert https_key in m.requests, "request must be recorded under https:// scheme"
-        assert http_key not in m.requests, (
-            "should not appear under http:// when orig scheme is https"
-        )
+        assert http_key not in m.requests, "should not appear under http:// when orig scheme is https"
 
 
 async def test_duplicate_query_keys_preserved_in_callback():
@@ -959,16 +898,13 @@ async def test_duplicate_query_keys_preserved_in_callback():
         seen_query.update(kwargs.get("query", {}))
         return CallbackResult(status=200)
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://qs.test/?a=1&a=2", callback=cb)
-            await session.get("http://qs.test/?a=1&a=2")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://qs.test/?a=1&a=2", callback=cb)
+        await session.get("http://qs.test/?a=1&a=2")
 
     # dict(MultiDict) keeps only the last value — the bug makes this {"a": "2"}
     # The fix should preserve both values, e.g. as a list: {"a": ["1", "2"]}
-    assert seen_query.get("a") == ["1", "2"], (
-        f"Expected both values for 'a', got: {seen_query.get('a')!r}"
-    )
+    assert seen_query.get("a") == ["1", "2"], f"Expected both values for 'a', got: {seen_query.get('a')!r}"
 
 
 async def test_concurrent_requests_no_race():
@@ -978,15 +914,12 @@ async def test_concurrent_requests_no_race():
         await asyncio.sleep(uniform(0.01, 0.1))
         return CallbackResult(body=b"ok")
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            for i in range(10):
-                m.get(f"http://race.test/id-{i}", callback=random_sleep_cb)
-            responses = await asyncio.gather(
-                *[session.get(f"http://race.test/id-{i}") for i in range(10)]
-            )
-            for resp in responses:
-                assert resp.status == 200
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        for i in range(10):
+            m.get(f"http://race.test/id-{i}", callback=random_sleep_cb)
+        responses = await asyncio.gather(*[session.get(f"http://race.test/id-{i}") for i in range(10)])
+        for resp in responses:
+            assert resp.status == 200
 
 
 # ---------------------------------------------------------------------------
@@ -997,26 +930,22 @@ async def test_concurrent_requests_no_race():
 async def test_assert_called_with_strict_headers_pass():
     """strict_headers=True passes when the full header map matches exactly."""
     url = "http://example.com/strict"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url, headers={"X-Token": "abc"})
-            actual = dict(m.requests[("GET", URL(url))][-1].headers)
-            actual.pop("x-aiointercept-orig-scheme", None)
-            m.assert_called_with(url, headers=actual, strict_headers=True)
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url, headers={"X-Token": "abc"})
+        actual = dict(m.requests[("GET", URL(url))][-1].headers)
+        actual.pop("x-aiointercept-orig-scheme", None)
+        m.assert_called_with(url, headers=actual, strict_headers=True)
 
 
 async def test_assert_called_with_strict_headers_fail():
     """strict_headers=True raises AssertionError when the header map does not match."""
     url = "http://example.com/strictfail"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url, headers={"X-Token": "abc"})
-            with pytest.raises(AssertionError):
-                m.assert_called_with(
-                    url, headers={"X-Token": "wrong"}, strict_headers=True
-                )
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url, headers={"X-Token": "abc"})
+        with pytest.raises(AssertionError):
+            m.assert_called_with(url, headers={"X-Token": "wrong"}, strict_headers=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,12 +956,11 @@ async def test_assert_called_with_strict_headers_fail():
 async def test_assert_called_with_extra_kwargs_deprecation():
     """Passing unknown kwargs to assert_called_with emits a DeprecationWarning."""
     url = "http://example.com/acw-kwargs"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get(url, status=200)
-            await session.get(url)
-            with pytest.warns(DeprecationWarning):
-                m.assert_called_with(url, unknown_arg="ignored")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get(url, status=200)
+        await session.get(url)
+        with pytest.warns(DeprecationWarning, match="Passing extra parameters to assert_called_with"):
+            m.assert_called_with(url, unknown_arg="ignored")
 
 
 # ---------------------------------------------------------------------------
@@ -1043,14 +971,11 @@ async def test_assert_called_with_extra_kwargs_deprecation():
 async def test_assert_called_with_data_dict_wrong_content_type():
     """assert_called_with(data=dict) raises when body was sent as JSON, not form-encoded."""
     url = "http://example.com/wrongct"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, json={"field": "value"})
-            with pytest.raises(
-                AssertionError, match="application/x-www-form-urlencoded"
-            ):
-                m.assert_called_with(url, method="POST", data={"field": "value"})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, json={"field": "value"})
+        with pytest.raises(AssertionError, match="application/x-www-form-urlencoded"):
+            m.assert_called_with(url, method="POST", data={"field": "value"})
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +986,7 @@ async def test_assert_called_with_data_dict_wrong_content_type():
 async def test_add_negative_repeat_raises():
     """A negative integer repeat value raises ValueError immediately."""
     async with aiointercept(mock_external_urls=True) as m:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="repeat must be at least 1"):
             m.get("http://example.com/negrepeat", status=200, repeat=-1)
 
 
@@ -1072,11 +997,10 @@ async def test_add_negative_repeat_raises():
 
 async def test_add_explicit_content_type():
     """content_type= overrides the default application/json Content-Type header."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://ct.test/", body=b"hello", content_type="text/plain")
-            resp = await session.get("http://ct.test/")
-            assert resp.content_type == "text/plain"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://ct.test/", body=b"hello", content_type="text/plain")
+        resp = await session.get("http://ct.test/")
+        assert resp.content_type == "text/plain"
 
 
 # ---------------------------------------------------------------------------
@@ -1086,11 +1010,10 @@ async def test_add_explicit_content_type():
 
 async def test_add_reason_phrase():
     """reason= is forwarded to the HTTP response reason phrase."""
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://reason.test/", status=200, reason="All Good")
-            resp = await session.get("http://reason.test/")
-            assert resp.reason == "All Good"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://reason.test/", status=200, reason="All Good")
+        resp = await session.get("http://reason.test/")
+        assert resp.reason == "All Good"
 
 
 async def test_callback_result_reason():
@@ -1099,11 +1022,10 @@ async def test_callback_result_reason():
     def cb(url, **kwargs):
         return CallbackResult(status=200, reason="Callback Fine")
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://reason.test/cb", callback=cb)
-            resp = await session.get("http://reason.test/cb")
-            assert resp.reason == "Callback Fine"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://reason.test/cb", callback=cb)
+        resp = await session.get("http://reason.test/cb")
+        assert resp.reason == "Callback Fine"
 
 
 # ---------------------------------------------------------------------------
@@ -1117,11 +1039,10 @@ async def test_callback_result_headers():
     def cb(url, **kwargs):
         return CallbackResult(status=200, headers={"X-From-Callback": "yes"})
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.get("http://cbheaders.test/", callback=cb)
-            resp = await session.get("http://cbheaders.test/")
-            assert resp.headers.get("X-From-Callback") == "yes"
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.get("http://cbheaders.test/", callback=cb)
+        resp = await session.get("http://cbheaders.test/")
+        assert resp.headers.get("X-From-Callback") == "yes"
 
 
 # ---------------------------------------------------------------------------
@@ -1133,26 +1054,24 @@ async def test_exception_true_no_log_warning(caplog):
     """exception=True closes the connection without emitting a logger.warning."""
     import logging
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            with caplog.at_level(logging.WARNING, logger="aiointercept.core"):
-                m.get("http://example.com/exc-true", exception=True)
-            assert not caplog.records
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://example.com/exc-true")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        with caplog.at_level(logging.WARNING, logger="aiointercept.core"):
+            m.get("http://example.com/exc-true", exception=True)
+        assert not caplog.records
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://example.com/exc-true")
 
 
 async def test_exception_instance_logs_warning(caplog):
     """Passing an exception instance to exception= emits a logger.warning."""
     import logging
 
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            with caplog.at_level(logging.WARNING, logger="aiointercept.core"):
-                m.get("http://example.com/exc-inst", exception=ValueError("boom"))
-            assert caplog.records
-            with pytest.raises(ClientConnectionError):
-                await session.get("http://example.com/exc-inst")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        with caplog.at_level(logging.WARNING, logger="aiointercept.core"):
+            m.get("http://example.com/exc-inst", exception=ValueError("boom"))
+        assert caplog.records
+        with pytest.raises(ClientConnectionError):
+            await session.get("http://example.com/exc-inst")
 
 
 # ---------------------------------------------------------------------------
@@ -1162,13 +1081,10 @@ async def test_exception_instance_logs_warning(caplog):
 
 async def test_exception_only_registration_raises_connection_error():
     """When exception= is the only registration for a host, requests raise ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.post("http://example.com/path", exception=True)
-            with pytest.raises(ClientConnectionError):
-                await session.post("http://example.com/path")
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.post("http://example.com/path", exception=True)
+        with pytest.raises(ClientConnectionError):
+            await session.post("http://example.com/path")
 
 
 # ---------------------------------------------------------------------------
@@ -1212,16 +1128,13 @@ async def test_passthrough_unmatched_url_handler_unknown_path_proxied():
     """With URL-based (non-pattern) handlers and passthrough_unmatched=True, an
     unregistered path on a registered host is proxied to the real server, not
     closed with ClientConnectionError."""
-    async with ClientSession() as session:
-        async with aiointercept(
-            mock_external_urls=True, passthrough_unmatched=True
-        ) as m:
-            m.get("http://httpbin.org/status/200", status=418)
-            mocked = await session.get("http://httpbin.org/status/200")
-            assert mocked.status == 418
-            # Same host, different path — should proxy to real httpbin, not close.
-            real = await session.get("http://httpbin.org/status/201")
-            assert real.status == 201
+    async with ClientSession() as session, aiointercept(mock_external_urls=True, passthrough_unmatched=True) as m:
+        m.get("http://httpbin.org/status/200", status=418)
+        mocked = await session.get("http://httpbin.org/status/200")
+        assert mocked.status == 418
+        # Same host, different path — should proxy to real httpbin, not close.
+        real = await session.get("http://httpbin.org/status/201")
+        assert real.status == 201
 
 
 # ---------------------------------------------------------------------------
@@ -1282,12 +1195,11 @@ def test_passthrough_unmatched_without_mock_external_urls_raises():
 async def test_assert_called_with_json_when_body_not_json():
     """assert_called_with(json=...) raises AssertionError when the actual body is not valid JSON."""
     url = "http://example.com/notjson"
-    async with ClientSession() as session:
-        async with aiointercept(mock_external_urls=True) as m:
-            m.post(url, status=200)
-            await session.post(url, data=b"this is not json{")
-            with pytest.raises(AssertionError, match="non-JSON body"):
-                m.assert_called_with(url, method="POST", json={"x": 1})
+    async with ClientSession() as session, aiointercept(mock_external_urls=True) as m:
+        m.post(url, status=200)
+        await session.post(url, data=b"this is not json{")
+        with pytest.raises(AssertionError, match="non-JSON body"):
+            m.assert_called_with(url, method="POST", json={"x": 1})
 
 
 async def test_async_callback_runs_on_server_loop_when_caller_loop_unset():
@@ -1338,6 +1250,7 @@ async def test_pending_tasks_cancelled_on_shutdown():
 async def test_server_thread_startup_failure_propagates():
     """A failure in TestServer.start_server is captured in the worker thread and re-raised."""
     from unittest.mock import patch
+
     from aiohttp.test_utils import TestServer
 
     async def boom(self, *args, **kwargs):
@@ -1354,8 +1267,9 @@ async def test_server_thread_startup_failure_propagates():
 
 async def test_aenter_failure_after_server_start_cleans_up():
     """If __aenter__ fails after the server starts, _stop_server_thread is called."""
-    from aiointercept import core as ai_core
     from aiohttp.connector import TCPConnector
+
+    from aiointercept import core as ai_core
 
     m = aiointercept(mock_external_urls=True)
 

@@ -1,3 +1,3 @@
-from .core import aiointercept, AiointerceptRequest, CallbackResult
+from .core import AiointerceptRequest, CallbackResult, aiointercept
 
-__all__ = ["aiointercept", "AiointerceptRequest", "CallbackResult"]
+__all__ = ["AiointerceptRequest", "CallbackResult", "aiointercept"]
