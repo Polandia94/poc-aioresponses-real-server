@@ -1,3 +1,4 @@
+import asyncio
 import socket
 import threading
 from functools import wraps
@@ -229,37 +230,59 @@ class aiointercept:
 
         self.server: TestServer | None = None
         self._bypass_session: aiohttp.ClientSession | None = None
+        # The intercept server runs on its own daemon thread + event loop so
+        # that callers whose loop gets blocked (e.g. Starlette TestClient
+        # holding the loop during a sync request) cannot deadlock the server.
+        self._server_thread: threading.Thread | None = None
+        self._server_loop: asyncio.AbstractEventLoop | None = None
+        # The loop the caller entered the context manager on. Async user
+        # callbacks are scheduled back onto this loop so they observe the
+        # same loop-bound primitives (asyncio.Event, asyncio.Queue, ...) as
+        # the rest of the test.
+        self._caller_loop: asyncio.AbstractEventLoop | None = None
 
     async def __aenter__(self) -> "aiointercept":
-        app = web.Application()
-        # we add every route to the app.
-        app.router.add_route("*", "/{tail:.*}", self._dispatch)
-        self.server = TestServer(app)
-        await self.server.start_server()
+        self._caller_loop = asyncio.get_running_loop()
+        await self._start_server_thread()
+        assert self._server_loop is not None and self.server is not None
 
         assert isinstance(self.server.host, str) and isinstance(self.server.port, int)  # pyright: ignore[reportUnknownMemberType]
         self.server_host = self.server.host
         self.server_port = self.server.port
         self.server_url = f"http://{self.server_host}:{self.server.port}"
 
-        if self._mock_external_urls:
-            global \
-                _patch_refcount, \
-                _real_threaded_resolve, \
-                _real_async_resolve, \
-                _real_ssl_context
-            with _patch_lock:
-                _active_instances.append(self)
-                if _patch_refcount == 0:
-                    _real_threaded_resolve = ThreadedResolver.resolve
-                    _real_async_resolve = AsyncResolver.resolve
-                    _real_ssl_context = TCPConnector._get_ssl_context  # pyright: ignore[reportPrivateUsage]
-                    ThreadedResolver.resolve = _shared_resolve  # type: ignore
-                    AsyncResolver.resolve = _shared_resolve  # type: ignore
-                    TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
-                _patch_refcount += 1
-            self._clear_all_connector_caches()
-            self._bypass_session = self._make_bypass_session()
+        try:
+            if self._mock_external_urls:
+                global \
+                    _patch_refcount, \
+                    _real_threaded_resolve, \
+                    _real_async_resolve, \
+                    _real_ssl_context
+                with _patch_lock:
+                    _active_instances.append(self)
+                    if _patch_refcount == 0:
+                        _real_threaded_resolve = ThreadedResolver.resolve
+                        _real_async_resolve = AsyncResolver.resolve
+                        _real_ssl_context = TCPConnector._get_ssl_context  # pyright: ignore[reportPrivateUsage]
+                        ThreadedResolver.resolve = _shared_resolve  # type: ignore
+                        AsyncResolver.resolve = _shared_resolve  # type: ignore
+                        TCPConnector._get_ssl_context = _shared_ssl_context  # type: ignore
+                    _patch_refcount += 1
+                self._clear_all_connector_caches()
+
+                # ClientSession binds to the running loop at construction time,
+                # so build it on the server loop (where _dispatch will use it).
+                async def _create_bypass() -> None:
+                    self._bypass_session = self._make_bypass_session()
+
+                await asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(
+                        _create_bypass(), self._server_loop
+                    )
+                )
+        except BaseException:
+            await self._stop_server_thread()
+            raise
 
         return self
 
@@ -269,33 +292,109 @@ class aiointercept:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        if self._mock_external_urls:
-            global \
-                _patch_refcount, \
-                _real_threaded_resolve, \
-                _real_async_resolve, \
-                _real_ssl_context
-            with _patch_lock:
-                _active_instances.remove(self)
-                _patch_refcount -= 1
-                if _patch_refcount == 0:
-                    ThreadedResolver.resolve = _real_threaded_resolve  # type: ignore[method-assign]
-                    AsyncResolver.resolve = _real_async_resolve  # type: ignore[method-assign]
-                    TCPConnector._get_ssl_context = _real_ssl_context  # type: ignore[method-assign,reportPrivateUsage]
-                    _real_threaded_resolve = None
-                    _real_async_resolve = None
-                    _real_ssl_context = None
-        if self._bypass_session:
-            await self._bypass_session.close()
-            self._bypass_session = None
-        if self.server:
-            await self.server.close()
-            self.server = None
-        self.handlers.clear()
-        self.patterns_handler.clear()
-        self._host_list.clear()
-        self._https_hosts.clear()
-        self._patterns_list.clear()
+        try:
+            if self._mock_external_urls:
+                global \
+                    _patch_refcount, \
+                    _real_threaded_resolve, \
+                    _real_async_resolve, \
+                    _real_ssl_context
+                with _patch_lock:
+                    _active_instances.remove(self)
+                    _patch_refcount -= 1
+                    if _patch_refcount == 0:
+                        ThreadedResolver.resolve = _real_threaded_resolve  # type: ignore[method-assign]
+                        AsyncResolver.resolve = _real_async_resolve  # type: ignore[method-assign]
+                        TCPConnector._get_ssl_context = _real_ssl_context  # type: ignore[method-assign,reportPrivateUsage]
+                        _real_threaded_resolve = None
+                        _real_async_resolve = None
+                        _real_ssl_context = None
+        finally:
+            await self._stop_server_thread()
+            self._caller_loop = None
+            self.handlers.clear()
+            self.patterns_handler.clear()
+            self._host_list.clear()
+            self._https_hosts.clear()
+            self._patterns_list.clear()
+
+    async def _start_server_thread(self) -> None:
+        ready = threading.Event()
+        startup_error: list[BaseException] = []
+
+        def _run_server_thread() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._server_loop = loop
+
+            async def _start_server() -> None:
+                app = web.Application()
+                app.router.add_route("*", "/{tail:.*}", self._dispatch)
+                self.server = TestServer(app)
+                await self.server.start_server()
+
+            try:
+                loop.run_until_complete(_start_server())
+            except BaseException as e:
+                startup_error.append(e)
+                ready.set()
+                loop.close()
+                self._server_loop = None
+                return
+
+            ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                # Drain anything still scheduled before closing the loop.
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                finally:
+                    loop.close()
+
+        self._server_thread = threading.Thread(
+            target=_run_server_thread, name="aiointercept-server", daemon=True
+        )
+        self._server_thread.start()
+        # ready.wait runs on the caller's loop thread; the server thread sets
+        # the event quickly so a brief blocking wait here is acceptable.
+        ready.wait()
+        if startup_error:
+            self._server_thread.join()
+            self._server_thread = None
+            raise startup_error[0]
+
+    async def _stop_server_thread(self) -> None:
+        server_loop = self._server_loop
+        if server_loop is not None and server_loop.is_running():
+
+            async def _teardown() -> None:
+                if self._bypass_session is not None:
+                    await self._bypass_session.close()
+                    self._bypass_session = None
+                if self.server is not None:
+                    await self.server.close()
+                    self.server = None
+
+            try:
+                await asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(_teardown(), server_loop)
+                )
+            finally:
+                server_loop.call_soon_threadsafe(server_loop.stop)
+
+        if self._server_thread is not None:
+            self._server_thread.join()
+            self._server_thread = None
+        self._server_loop = None
+        self._bypass_session = None
+        self.server = None
 
     # Decorator support
     def __call__(
@@ -538,12 +637,26 @@ class aiointercept:
 
         async def handler(request: web.Request) -> web.Response:
             if callable(callback):
+                cb_kwargs = cast(AiointerceptRequest, request).kwargs
                 if inspect.iscoroutinefunction(callback):
-                    result = await callback(
-                        url, **cast(AiointerceptRequest, request).kwargs
-                    )
+                    # Async callbacks run on the caller's loop so that
+                    # loop-bound primitives (asyncio.Event, asyncio.Queue,
+                    # asyncio.Lock created by the test) keep working.
+                    caller_loop = self._caller_loop
+                    if (
+                        caller_loop is not None
+                        and not caller_loop.is_closed()
+                        and caller_loop is not asyncio.get_running_loop()
+                    ):
+                        result = await asyncio.wrap_future(
+                            asyncio.run_coroutine_threadsafe(
+                                callback(url, **cb_kwargs), caller_loop
+                            )
+                        )
+                    else:
+                        result = await callback(url, **cb_kwargs)
                 else:
-                    result = callback(url, **cast(AiointerceptRequest, request).kwargs)
+                    result = callback(url, **cb_kwargs)
                 _status = result.status
                 _body = result.body
                 _headers = result.headers or {}

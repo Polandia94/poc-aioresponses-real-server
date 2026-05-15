@@ -13,6 +13,8 @@ from random import uniform
 from aiointercept import aiointercept, CallbackResult
 from tests.conftest import network_retry
 
+import threading
+import concurrent.futures
 # ---------------------------------------------------------------------------
 # Basic mock_external_urls=True (DNS patched) vs False (direct to server)
 # ---------------------------------------------------------------------------
@@ -1220,3 +1222,168 @@ async def test_passthrough_unmatched_url_handler_unknown_path_proxied():
             # Same host, different path — should proxy to real httpbin, not close.
             real = await session.get("http://httpbin.org/status/201")
             assert real.status == 201
+
+
+# ---------------------------------------------------------------------------
+# Caller-loop-blocked patterns (TestClient deadlock regression)
+# ---------------------------------------------------------------------------
+
+
+async def test_caller_loop_blocked_does_not_deadlock():
+    """Regression: when the caller's event loop is blocked synchronously during
+    a request — the pattern Starlette/FastAPI TestClient produces — the intercept
+    server must still accept and serve the connection. The server runs on its
+    own thread + loop, so this works by construction."""
+
+    async with aiointercept(mock_external_urls=True) as m:
+        m.get("http://blocked.test/api", status=200, body=b"served")
+
+        done = threading.Event()
+        result: dict[str, object] = {}
+
+        def _do_blocking_request() -> None:
+            # A fresh event loop in a worker thread, used synchronously
+            # (run_until_complete) — mirrors Starlette TestClient, which runs
+            # the ASGI app in a worker thread with its own loop and blocks
+            # the caller via a sync method.
+            worker_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(worker_loop)
+
+                async def _request() -> None:
+                    async with ClientSession() as session:
+                        resp = await session.get("http://blocked.test/api")
+                        result["status"] = resp.status
+                        result["body"] = await resp.read()
+
+                worker_loop.run_until_complete(_request())
+            finally:
+                worker_loop.close()
+                done.set()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_do_blocking_request)
+            # Do not yield control back to the caller's loop until the worker
+            # finishes — this is what TestClient effectively does by blocking
+            # the caller via a sync method. If the intercept server were bound
+            # to the caller's loop, this would deadlock.
+            done.wait(timeout=10)
+            fut.result(timeout=1)
+
+        assert result == {"status": 200, "body": b"served"}
+
+
+def test_passthrough_unmatched_without_mock_external_urls_raises():
+    """passthrough_unmatched=True without mock_external_urls=True raises ValueError."""
+    with pytest.raises(ValueError, match="mock_external_urls=True"):
+        aiointercept(mock_external_urls=False, passthrough_unmatched=True)
+
+
+async def test_assert_called_with_json_when_body_not_json():
+    """assert_called_with(json=...) raises AssertionError when the actual body is not valid JSON."""
+    url = "http://example.com/notjson"
+    async with ClientSession() as session:
+        async with aiointercept(mock_external_urls=True) as m:
+            m.post(url, status=200)
+            await session.post(url, data=b"this is not json{")
+            with pytest.raises(AssertionError, match="non-JSON body"):
+                m.assert_called_with(url, method="POST", json={"x": 1})
+
+
+async def test_async_callback_runs_on_server_loop_when_caller_loop_unset():
+    """If _caller_loop is None, async callbacks execute directly on the server loop."""
+
+    async def cb(url, **kwargs):
+        return CallbackResult(status=205, body=b"server-loop")
+
+    async with aiointercept(mock_external_urls=True) as m:
+        m._caller_loop = None
+        m.get("http://no-caller-loop.test/", callback=cb)
+        async with ClientSession() as session:
+            resp = await session.get("http://no-caller-loop.test/")
+            assert resp.status == 205
+            assert await resp.read() == b"server-loop"
+
+
+async def test_shared_resolve_no_active_instances_uses_real_resolver():
+    """With patches installed but no active instances, _shared_resolve calls the real resolver."""
+    from aiointercept import core as ai_core
+
+    async with aiointercept(mock_external_urls=True) as m:
+        with ai_core._patch_lock:
+            ai_core._active_instances.remove(m)
+        try:
+            resolver = ThreadedResolver()
+            results = await ai_core._shared_resolve(resolver, "localhost", 0)
+            assert isinstance(results, list)
+            assert len(results) >= 1
+        finally:
+            with ai_core._patch_lock:
+                ai_core._active_instances.append(m)
+
+
+async def test_pending_tasks_cancelled_on_shutdown():
+    """Tasks pending on the server loop when the context exits are cancelled and gathered."""
+    async with aiointercept(mock_external_urls=True) as m:
+        m.get("http://drain.test/", status=200)
+        # Schedule a long-running task on the server loop that will still be pending
+        # when the context manager calls loop.stop(). The shutdown finally-block must
+        # cancel and gather it so the loop closes cleanly.
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(60), m._server_loop)
+        async with ClientSession() as session:
+            resp = await session.get("http://drain.test/")
+            assert resp.status == 200
+
+
+async def test_server_thread_startup_failure_propagates():
+    """A failure in TestServer.start_server is captured in the worker thread and re-raised."""
+    from unittest.mock import patch
+    from aiohttp.test_utils import TestServer
+
+    async def boom(self, *args, **kwargs):
+        raise RuntimeError("startup failed")
+
+    with patch.object(TestServer, "start_server", boom):
+        m = aiointercept(mock_external_urls=False)
+        with pytest.raises(RuntimeError, match="startup failed"):
+            await m.__aenter__()
+
+    assert m._server_thread is None
+    assert m._server_loop is None
+
+
+async def test_aenter_failure_after_server_start_cleans_up():
+    """If __aenter__ fails after the server starts, _stop_server_thread is called."""
+    from aiointercept import core as ai_core
+    from aiohttp.connector import TCPConnector
+
+    m = aiointercept(mock_external_urls=True)
+
+    def bad(*args, **kwargs):
+        raise RuntimeError("bypass failed")
+
+    m._make_bypass_session = bad  # type: ignore[method-assign]
+
+    try:
+        with pytest.raises(RuntimeError, match="bypass failed"):
+            await m.__aenter__()
+    finally:
+        # The except branch only stops the server thread — patching state is left
+        # incremented. Roll it back manually so other tests are not affected.
+        with ai_core._patch_lock:
+            if m in ai_core._active_instances:
+                ai_core._active_instances.remove(m)
+                ai_core._patch_refcount -= 1
+                if ai_core._patch_refcount == 0:
+                    if ai_core._real_threaded_resolve is not None:
+                        ThreadedResolver.resolve = ai_core._real_threaded_resolve  # type: ignore[method-assign]
+                    if ai_core._real_async_resolve is not None:
+                        AsyncResolver.resolve = ai_core._real_async_resolve  # type: ignore[method-assign]
+                    if ai_core._real_ssl_context is not None:
+                        TCPConnector._get_ssl_context = ai_core._real_ssl_context  # type: ignore[method-assign]
+                    ai_core._real_threaded_resolve = None
+                    ai_core._real_async_resolve = None
+                    ai_core._real_ssl_context = None
+
+    assert m._server_thread is None
+    assert m._server_loop is None
