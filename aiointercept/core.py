@@ -412,9 +412,9 @@ class aiointercept:  # noqa: N801
         its DNS cache.  This ensures pre-patch resolutions are not reused.
         """
         for obj in gc.get_objects():
-            if not isinstance(obj, aiohttp.TCPConnector):
-                continue
             with contextlib.suppress(Exception):
+                if not isinstance(obj, aiohttp.TCPConnector):
+                    continue
                 obj.clear_dns_cache()
 
     async def _dispatch(self, request: web.Request) -> web.StreamResponse:
