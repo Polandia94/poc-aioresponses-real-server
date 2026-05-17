@@ -5,19 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] - 2026-05-17
 
 ### Fixed
 
 - The intercept `TestServer` no longer runs on the caller's event loop. It now starts on a dedicated daemon thread with its own loop, so callers that block their own loop between `__aenter__` and `__aexit__` (e.g. Starlette/FastAPI `TestClient`, which holds the loop during a synchronous `client.get(...)` call) can no longer deadlock the mock server. Plain mocks (`m.get(url, status=...)`) under `TestClient` now work by construction.
+- During the DNS-cache purge in `_clear_existing_connector_caches`, the `isinstance(obj, aiohttp.TCPConnector)` check is now performed inside `contextlib.suppress(Exception)`, so a stray object whose `__class__` lookup raises during `gc.get_objects()` iteration no longer aborts the purge for the remaining connectors.
 
 ### Changed
 
 - Async user callbacks registered via `callback=` are now executed on the caller's event loop (the loop active when `__aenter__` was called), even though the server runs on its own loop. This preserves prior semantics: `asyncio.Event`, `asyncio.Queue`, `asyncio.Lock`, and other loop-bound primitives shared between the test and the callback continue to work. Sync callbacks are unaffected and continue to run on the server loop.
+- Package metadata modernized: `license` is now an SPDX expression (`"MIT"`) and the deprecated `License :: OSI Approved :: MIT License` trove classifier was removed.
 
 ### Internal
 
 - Expanded the `ruff` lint rule set (`UP`, `B`, `C4`, `SIM`, `N`, `RUF`, `PT`, `TCH`, `ASYNC`, `PERF`, `RET`, `ARG`) with `line-length = 120` and `target-version = "py310"`, and reformatted `aiointercept/core.py` accordingly: PEP 585 `type[X]` over `typing.Type[X]`, string-form `cast("X", ...)` annotations, `contextlib.suppress` instead of `try/except/pass`, and consolidated imports. No behaviour change.
+- Bumped the `mypy` dev dependency to `>=2.0.0,<2.1.0`.
 
 ### Known limitations
 
